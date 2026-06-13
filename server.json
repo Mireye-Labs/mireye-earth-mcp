@@ -1,0 +1,56 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "com.mireye/earth",
+  "description": "MCP server for Mireye Earth — federal-source-cited geospatial data for any MCP-aware agent.",
+  "version": "0.2.0",
+  "websiteUrl": "https://api.mireye.com",
+  "repository": {
+    "url": "https://github.com/Mireye-Labs/mireye-earth-mcp",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "mireye-mcp",
+      "version": "0.2.0",
+      "runtimeHint": "uvx",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "MIREYE_BASE_URL",
+          "description": "Base URL of the Mireye API. Defaults to https://api.mireye.com. Stored login credentials only attach when created against this same URL.",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "MIREYE_BEARER_TOKEN",
+          "description": "Mireye API bearer token. Optional alternative to `mireye-mcp login` for non-interactive hosts.",
+          "isRequired": false,
+          "isSecret": true,
+          "format": "string"
+        },
+        {
+          "name": "MIREYE_TIMEOUT_S",
+          "description": "Per-request timeout in seconds. Defaults to 60.",
+          "isRequired": false,
+          "format": "number"
+        },
+        {
+          "name": "MIREYE_MCP_CREDENTIALS_FILE",
+          "description": "Path to the credentials file written by `mireye-mcp login`. Defaults to ~/.config/mireye-mcp/credentials.json.",
+          "isRequired": false,
+          "format": "filepath"
+        }
+      ]
+    }
+  ],
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://api.mireye.com/mcp"
+    }
+  ]
+}
