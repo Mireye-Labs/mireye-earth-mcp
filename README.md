@@ -30,7 +30,7 @@ it uses `mireye-mcp login` or `MIREYE_BEARER_TOKEN` for credentials.
 
 ## What the agent gets
 
-Two tools, both prefixed `mireye_` so they sort together and don't
+Three tools, all prefixed `mireye_` so they sort together and don't
 collide with generic `ask` / `fetch` tools from other MCP servers:
 
 | Tool            | When the agent should call it                                                                  |
@@ -87,17 +87,17 @@ mireye-mcp  # entry point
 
 ## Official MCP Registry
 
-This server publishes to the
+This server is published to the
 [Official MCP Registry](https://registry.modelcontextprotocol.io) as
-**`com.mireye/earth`** (the entry goes live with the next tagged
-release; the publish job ships from `release.yml`). The registry entry
+**`com.mireye/earth`** — the entry is live (the publish job ships from
+`release.yml`), and `mireye-mcp` 0.2.0 is on PyPI. The registry entry
 carries both distributions:
 
 - the **PyPI package** `mireye-mcp` (local stdio, run via `uvx`), and
 - the **hosted remote** `https://api.mireye.com/mcp` (Streamable HTTP +
   OAuth) for clients that prefer a remote server.
 
-Once the entry is live, registry-aware clients (VS Code, the GitHub MCP
+Because the entry is live, registry-aware clients (VS Code, the GitHub MCP
 Registry, and anything else that reads the official registry) can
 discover and install it from there — no manual config required.
 
@@ -127,7 +127,8 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json`
 }
 ```
 
-Restart Claude Desktop. The two tools (`mireye_ask`, `mireye_fetch`)
+Restart Claude Desktop. The three tools (`mireye_ask`, `mireye_fetch`,
+`mireye_geocode`)
 appear under the 🔌 menu, with catalog resources and prompts available to
 clients that surface those MCP primitives.
 
@@ -222,7 +223,7 @@ async with stdio_client(params) as (read, write):
 | Env var            | Default                          | Purpose                          |
 |--------------------|----------------------------------|----------------------------------|
 | `MIREYE_BASE_URL`  | `https://api.mireye.com`   | HTTP base URL the tools POST to. Stored login credentials only attach when they were created against this same URL. |
-| `MIREYE_TIMEOUT_S` | `60`                             | Per-request timeout in seconds.  |
+| `MIREYE_TIMEOUT_S` | `120`                            | Per-request timeout in seconds (must exceed the ~110 s `/v1/ask` deadline). |
 | `MIREYE_BEARER_TOKEN` | unset | Optional Mireye bearer token. Overrides stored credentials for tool calls; `status` reports on the stored login first. |
 | `MIREYE_MCP_CREDENTIALS_FILE` | `~/.config/mireye-mcp/credentials.json` | Stored token path used by `login` / `status` / `logout`. |
 
@@ -305,8 +306,9 @@ PATH issue.
 **`ConnectError` / `ReadTimeout`** on the first tool call. The hosted
 API keeps its machines running, but calls right after a backend deploy
 can be slow while geospatial sources warm in the background, and some
-fields depend on slow upstream federal services. Increase
-`MIREYE_TIMEOUT_S` to 90 if you are repeatedly hitting timeouts.
+fields depend on slow upstream federal services. The default
+`MIREYE_TIMEOUT_S` (120 s) already exceeds the ~110 s `/v1/ask` deadline, so a
+cold start fits; only raise it further (never below 120) if you still time out.
 
 **HTTP 400 `coord_out_of_bounds`.** Mireye is US-only in V1. The accepted
 envelope is `lat ∈ [18, 72]`, `lng ∈ [-180, -65]` — covering the lower 48,

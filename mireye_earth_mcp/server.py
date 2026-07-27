@@ -14,7 +14,10 @@ Configuration (environment variables):
                       against this same URL; tokens are never sent over
                       plain http except to loopback hosts
                       (localhost/127.0.0.1/[::1]).
-    MIREYE_TIMEOUT_S  Per-request timeout in seconds. Defaults to 60.
+    MIREYE_TIMEOUT_S  Per-request timeout in seconds. Defaults to 120.
+                      mireye_ask is LLM-backed with a ~110 s server-side
+                      deadline, so the client timeout must exceed it — a
+                      shorter one abandons requests the server still bills.
     MIREYE_BEARER_TOKEN
                       Optional bearer token for authenticated API calls.
     MIREYE_MCP_CREDENTIALS_FILE
@@ -43,7 +46,7 @@ import sys
 import time
 import urllib.parse
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any
 from uuid import uuid4
 
 import httpx
@@ -51,9 +54,15 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
+from ._generated_presets import PRESET_NAMES, MireyePreset
+
 DEFAULT_BASE_URL = "https://api.mireye.com"
 MIREYE_BASE_URL: str = os.getenv("MIREYE_BASE_URL", DEFAULT_BASE_URL).rstrip("/")
-TIMEOUT_SECONDS: float = float(os.getenv("MIREYE_TIMEOUT_S", "60"))
+# Default must exceed the server's ~110 s /v1/ask deadline (+ margin): the buffered
+# mireye_ask can legitimately take up to that long, and a client timeout under it
+# abandons a request the server still (billably) completes. Override for
+# fetch-only workloads if a tighter bound is wanted.
+TIMEOUT_SECONDS: float = float(os.getenv("MIREYE_TIMEOUT_S", "120"))
 TIMEOUT: httpx.Timeout = httpx.Timeout(TIMEOUT_SECONDS)
 TOKEN_ENV = "MIREYE_BEARER_TOKEN"
 CREDENTIALS_FILE_ENV = "MIREYE_MCP_CREDENTIALS_FILE"
@@ -70,23 +79,9 @@ US_ENVELOPE: dict[str, float] = {
     "lng_max": -65.0,
 }
 
-MireyePreset = Literal[
-    "terrain",
-    "flood_risk",
-    "wildfire_underwrite",
-    "land_cover",
-    "site_selection",
-    "building_lookup",
-    "utilities",
-    "boundaries",
-    "solar_siting",
-    "wind_siting",
-    "storage_siting",
-    "data_center_siting",
-    "grid_interconnect",
-    "natural_hazard",
-]
-PRESET_NAMES = tuple(MireyePreset.__args__)
+# MireyePreset + PRESET_NAMES are generated from catalog.PRESETS by
+# `mireye-earth catalog codegen` (imported above). The stdio package stays
+# dependency-free: the generated module is a pure Literal, no mireye_earth import.
 
 MireyeLat = Annotated[
     float,
@@ -102,6 +97,17 @@ MireyeLng = Annotated[
         ge=US_ENVELOPE["lng_min"],
         le=US_ENVELOPE["lng_max"],
         description="Longitude in decimal degrees inside the supported US envelope.",
+    ),
+]
+MireyeAddress = Annotated[
+    str,
+    Field(
+        min_length=1,
+        max_length=256,
+        description=(
+            "US street address. Include a city+state or a ZIP — the upstream "
+            "cannot place a bare street line."
+        ),
     ),
 ]
 MireyeQuestion = Annotated[
@@ -395,6 +401,9 @@ def _response_error(
     code = f"http_{resp.status_code}"
     message = resp.reason_phrase or f"HTTP {resp.status_code}"
     context: dict[str, Any] = {}
+    # The API states retryability explicitly; the status code only approximates
+    # it. Start from the approximation and let the server override.
+    retryable = resp.status_code in {408, 429} or resp.status_code >= 500
     try:
         body = resp.json()
     except json.JSONDecodeError:
@@ -404,9 +413,19 @@ def _response_error(
         if isinstance(detail, dict):
             code = str(detail.get("error") or detail.get("code") or code)
             message = str(detail.get("message") or message)
+            # Prefer the server's own flag. Deriving retryability from the
+            # status alone contradicts it: `geocode_unconfigured` is a 503 the
+            # API marks NOT retryable (the key is missing from the serving
+            # env — retrying cannot fix a config gap), while `>= 500` reads it
+            # as transient and an agent client retries a permanent failure in a
+            # loop. The two MCP surfaces are asserted byte-identical on their
+            # tool DESCRIPTIONS, which cannot catch a behavioural split like
+            # this one.
+            if isinstance(detail.get("retryable"), bool):
+                retryable = detail["retryable"]
             context = {
                 k: v for k, v in detail.items()
-                if k not in {"error", "code", "message"}
+                if k not in {"error", "code", "message", "retryable"}
             }
         elif detail:
             message = str(detail)
@@ -418,9 +437,36 @@ def _response_error(
         resource_uri=resource_uri,
         http_status=resp.status_code,
         request_id=request_id,
-        retryable=resp.status_code in {408, 429} or resp.status_code >= 500,
+        retryable=retryable,
         context=context,
     )
+
+
+def _locator_body(
+    lat: float | None, lng: float | None, address: str | None, *, tool_name: str
+) -> dict[str, Any]:
+    """Build the lat/lng-or-address half of a request body.
+
+    This package is a thin HTTP proxy — the server owns the real contract. The
+    check here exists so an agent gets a structured, actionable tool error
+    instead of a round trip that comes back 422.
+    """
+    if address is not None and (lat is not None or lng is not None):
+        raise _tool_error(
+            code="invalid_locator",
+            message="Provide either lat+lng or address, not both.",
+            tool_name=tool_name,
+        )
+    if address is not None:
+        return {"address": address}
+    if lat is None or lng is None:
+        raise _tool_error(
+            code="invalid_locator",
+            message="Provide either lat+lng or address.",
+            tool_name=tool_name,
+        )
+    _validate_coordinate(lat, lng, tool_name=tool_name)
+    return {"lat": lat, "lng": lng}
 
 
 def _validate_coordinate(lat: float, lng: float, *, tool_name: str) -> None:
@@ -749,12 +795,14 @@ def _cmd_login(args: argparse.Namespace) -> int:
             if not result.get("token"):
                 print("Login failed: malformed device-flow response.", file=sys.stderr)
                 return 1
-            _store_credentials({
-                "base_url": MIREYE_BASE_URL,
-                "token": result["token"],
-                "token_id": result.get("token_id"),
-                "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            })
+            _store_credentials(
+                {
+                    "base_url": MIREYE_BASE_URL,
+                    "token": result["token"],
+                    "token_id": result.get("token_id"),
+                    "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                }
+            )
             print(f"Logged in. Credentials saved to {_credentials_path()}.")
             return 0
         if status in {"expired", "already_claimed"}:
@@ -860,10 +908,12 @@ def _build_parser() -> argparse.ArgumentParser:
 )
 def _mireye_catalog_fields_resource() -> str:
     catalog = _catalog_payload()
-    return _json_dumps({
-        "version": catalog.get("version"),
-        "fields": catalog.get("fields", []),
-    })
+    return _json_dumps(
+        {
+            "version": catalog.get("version"),
+            "fields": catalog.get("fields", []),
+        }
+    )
 
 
 @mcp.resource(
@@ -875,10 +925,12 @@ def _mireye_catalog_fields_resource() -> str:
 )
 def _mireye_catalog_presets_resource() -> str:
     catalog = _catalog_payload()
-    return _json_dumps({
-        "version": catalog.get("version"),
-        "presets": catalog.get("presets", {}),
-    })
+    return _json_dumps(
+        {
+            "version": catalog.get("version"),
+            "presets": catalog.get("presets", {}),
+        }
+    )
 
 
 @mcp.resource(
@@ -890,10 +942,12 @@ def _mireye_catalog_presets_resource() -> str:
 )
 def _mireye_us_envelope_resource() -> str:
     catalog = _catalog_payload()
-    return _json_dumps({
-        "version": catalog.get("version"),
-        "us_envelope": catalog.get("us_envelope", US_ENVELOPE),
-    })
+    return _json_dumps(
+        {
+            "version": catalog.get("version"),
+            "us_envelope": catalog.get("us_envelope", US_ENVELOPE),
+        }
+    )
 
 
 @mcp.resource(
@@ -936,14 +990,15 @@ def _mireye_preset_resource(name: str) -> str:
     annotations=READ_ONLY_TOOL_ANNOTATIONS,
     structured_output=True,
 )
-async def mireye_ask(lat: MireyeLat, lng: MireyeLng, question: MireyeQuestion) -> dict[str, Any]:
-    """Answer a natural-language question about a US coordinate, with citations to authoritative federal data sources. Returns the answer plus per-citation provenance (source, source URL, fetched_at, confidence). Use this when the caller has a specific question about a place (e.g. 'is this in a flood zone?', 'what's the wildfire risk here?', 'what kind of building is at this address?')."""  # noqa: E501
-    _validate_coordinate(lat, lng, tool_name="mireye_ask")
-    return await _post(
-        "/v1/ask",
-        {"lat": lat, "lng": lng, "question": question},
-        tool_name="mireye_ask",
-    )
+async def mireye_ask(
+    question: MireyeQuestion,
+    lat: MireyeLat | None = None,
+    lng: MireyeLng | None = None,
+    address: MireyeAddress | None = None,
+) -> dict[str, Any]:
+    """Answer a natural-language question about a US location, with citations to authoritative federal data sources. Give EITHER lat+lng OR address, never both. Returns the answer plus per-citation provenance (source, source URL, fetched_at, confidence). Use this when the caller has a specific question about a place (e.g. 'is this in a flood zone?', 'what's the wildfire risk here?'). When you pass an address, the response carries a `geocode` block: if `parcel_grade` is false the location was estimated from the street and can be ~2.9 km out in rural areas, and the answer says so."""  # noqa: E501
+    body = _locator_body(lat, lng, address, tool_name="mireye_ask")
+    return await _post("/v1/ask", {**body, "question": question}, tool_name="mireye_ask")
 
 
 @mcp.tool(
@@ -952,20 +1007,35 @@ async def mireye_ask(lat: MireyeLat, lng: MireyeLng, question: MireyeQuestion) -
     structured_output=True,
 )
 async def mireye_fetch(
-    lat: MireyeLat,
-    lng: MireyeLng,
+    lat: MireyeLat | None = None,
+    lng: MireyeLng | None = None,
+    address: MireyeAddress | None = None,
     fields: MireyeFields | None = None,
     preset: MireyePreset | None = None,
 ) -> dict[str, Any]:
-    """Fetch specific data fields at a US coordinate with full provenance per field. Use this when the caller knows exactly which fields they need (e.g. 'elevation and slope at this point') or wants to power a custom workflow. Each field includes its value, source, source URL, fetched_at timestamp, and confidence."""  # noqa: E501
-    _validate_coordinate(lat, lng, tool_name="mireye_fetch")
+    """Fetch specific data fields at a US location with full provenance per field. Give EITHER lat+lng OR address, never both. Use this when the caller knows exactly which fields they need (e.g. 'elevation and slope at this point') or wants to power a custom workflow. Each field includes its value, source, source URL, fetched_at timestamp, and confidence. When you pass an address, the response carries a `geocode` block: check `parcel_grade` before trusting parcel-specific fields — a false value means the coordinate was estimated from the street and can be ~2.9 km out in rural areas."""  # noqa: E501
+    payload = _locator_body(lat, lng, address, tool_name="mireye_fetch")
     _validate_fetch_args(fields, preset, tool_name="mireye_fetch")
-    payload: dict[str, Any] = {"lat": lat, "lng": lng}
     if fields:
         payload["fields"] = fields
     if preset:
         payload["preset"] = preset
     return await _post("/v1/fetch", payload, tool_name="mireye_fetch")
+
+
+@mcp.tool(
+    title="Geocode a US Address",
+    annotations=READ_ONLY_TOOL_ANNOTATIONS,
+    structured_output=True,
+)
+async def mireye_geocode(address: MireyeAddress) -> dict[str, Any]:
+    """Resolve a US street address to a coordinate, with the quality of that coordinate. Feed lat/lng to mireye_fetch or mireye_ask. ALWAYS check accuracy_type before trusting the result: 'rooftop' is on the parcel, but 'range_interpolation' is estimated along a street centerline and can be ~2.9 km out in rural areas — far enough to describe a neighbouring property instead. An address that can only be placed at a ZIP/city/county centroid is REJECTED as address_too_coarse rather than returned — if you get that, ask the user for a more complete address instead of retrying. The address you send is retained alongside the coordinate it resolves to, so a result can be audited later; pass lat/lng instead if that does not suit the caller."""  # noqa: E501
+    # Thin proxy, like every tool here — no geocoding logic crosses into this
+    # package. It stays dependency-light (httpx + mcp only) on purpose, which
+    # is also why this is a deliberate copy of the hosted tool rather than a
+    # shared import. Keep the signature and docstring in step with
+    # api/main.py's mireye_geocode; tests/test_mcp.py asserts surface parity.
+    return await _post("/v1/geocode", {"address": address}, tool_name="mireye_geocode")
 
 
 # Claude Code surfaces MCP prompts as slash commands under the form

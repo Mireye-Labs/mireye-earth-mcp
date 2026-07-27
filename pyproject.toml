@@ -1,6 +1,6 @@
 [project]
 name = "mireye-mcp"
-version = "0.2.0"
+version = "0.3.0"
 description = "MCP server for Mireye Earth — federal-source-cited geospatial data for any MCP-aware agent."
 readme = "README.md"
 requires-python = ">=3.10"
