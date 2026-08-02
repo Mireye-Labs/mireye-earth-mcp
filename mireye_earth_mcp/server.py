@@ -1162,6 +1162,235 @@ def _mireye_pick_fields_prompt(question: str) -> str:
     )
 
 
+@mcp.prompt(
+    name="mireye_lookup",
+    title="Mireye Lookup",
+    description="Resolve an address, \"lat,lng\" pair, or APN to canonical join keys.",
+)
+def _mireye_lookup_prompt(input: str, include_parcel: str = "") -> str:
+    """Resolve a locator to a coordinate, resolved address, and (when available) a parcel."""
+    parcel_clause = ""
+    if include_parcel.strip():
+        include = include_parcel.strip().lower() in {"1", "true", "yes"}
+        parcel_clause = f", include_parcel={include}"
+    return (
+        f"Call the `mireye_lookup` tool with input={input!r}{parcel_clause}. "
+        "Check `disposition` first: 'resolved' carries a coordinate (and a "
+        "parcel when available); 'clarify' means the input is genuinely "
+        "ambiguous — present the candidates to the user, never auto-pick one; "
+        "'no_match' is an honest failure with a reason. Include provenance and "
+        "confidence in the summary."
+    )
+
+
+@mcp.prompt(
+    name="mireye_fields",
+    title="Browse Mireye Fields",
+    description="Browse or search the Mireye field catalog by name, description, or layer.",
+)
+def _mireye_fields_prompt(search: str = "") -> str:
+    """Browse the Mireye field catalog, optionally filtered by a search term."""
+    if search.strip():
+        return (
+            f"Read `mireye://catalog/fields` and list every field whose name or "
+            f"description matches {search.strip()!r}, each with a one-line "
+            "description and which layer/presets it belongs to."
+        )
+    return (
+        "Read `mireye://catalog/fields` and summarize the available fields "
+        "grouped by layer (terrain, land_cover, built_environment, utilities, "
+        "parcels, climate, hazards), with a count per layer and a few "
+        "representative field names in each group."
+    )
+
+
+@mcp.prompt(
+    name="mireye_terrain_report",
+    title="Mireye Terrain Report",
+    description="Summarize terrain signals using the terrain preset.",
+)
+def _mireye_terrain_report_prompt(lat: str, lng: str) -> str:
+    """Summarize terrain signals for a coordinate."""
+    return (
+        f"Call `mireye_fetch` with lat={lat}, lng={lng}, preset='terrain'. "
+        "Summarize elevation, slope, aspect, distance to the coast, and "
+        "soil/bedrock characteristics. Include provenance and confidence."
+    )
+
+
+@mcp.prompt(
+    name="mireye_land_cover_report",
+    title="Mireye Land Cover Report",
+    description="Summarize land cover signals using the land_cover preset.",
+)
+def _mireye_land_cover_report_prompt(lat: str, lng: str) -> str:
+    """Summarize land cover signals for a coordinate."""
+    return (
+        f"Call `mireye_fetch` with lat={lat}, lng={lng}, preset='land_cover'. "
+        "Summarize land cover classification, land use, tree canopy percentage, "
+        "and dominant crop history. Include provenance and confidence."
+    )
+
+
+@mcp.prompt(
+    name="mireye_building_lookup_report",
+    title="Mireye Building Lookup Report",
+    description="Summarize the primary building using the building_lookup preset.",
+)
+def _mireye_building_lookup_report_prompt(lat: str, lng: str) -> str:
+    """Summarize the primary building at a coordinate."""
+    return (
+        f"Call `mireye_fetch` with lat={lat}, lng={lng}, "
+        "preset='building_lookup'. Summarize the primary building's type, "
+        "height, floor count, and footprint area. Include provenance and "
+        "confidence."
+    )
+
+
+@mcp.prompt(
+    name="mireye_points_of_interest_report",
+    title="Mireye Points of Interest Report",
+    description="Summarize nearby amenities using the points_of_interest preset.",
+)
+def _mireye_points_of_interest_report_prompt(lat: str, lng: str) -> str:
+    """Summarize nearby points of interest for a coordinate."""
+    return (
+        f"Call `mireye_fetch` with lat={lat}, lng={lng}, "
+        "preset='points_of_interest'. Summarize nearby hospitals, fire "
+        "stations, schools, grocery stores, lodging, dining (restaurants, "
+        "cafes, bars), gas stations, pharmacies, banks, and shopping, with "
+        "distances, plus overall POI density within 1km. Include provenance."
+    )
+
+
+@mcp.prompt(
+    name="mireye_utilities_report",
+    title="Mireye Utilities Report",
+    description="Summarize utility infrastructure using the utilities preset.",
+)
+def _mireye_utilities_report_prompt(lat: str, lng: str) -> str:
+    """Summarize utility infrastructure for a coordinate."""
+    return (
+        f"Call `mireye_fetch` with lat={lat}, lng={lng}, preset='utilities'. "
+        "Summarize the nearest power plant, transmission line access "
+        "(voltage, status, owner), gas pipeline proximity, and sewer service "
+        "availability. Include provenance and confidence."
+    )
+
+
+@mcp.prompt(
+    name="mireye_boundaries_report",
+    title="Mireye Boundaries Report",
+    description="Summarize political and census boundaries using the boundaries preset.",
+)
+def _mireye_boundaries_report_prompt(lat: str, lng: str) -> str:
+    """Summarize political and census boundaries for a coordinate."""
+    return (
+        f"Call `mireye_fetch` with lat={lat}, lng={lng}, preset='boundaries'. "
+        "Summarize the region, county, locality, and census tract the "
+        "coordinate falls in. Include provenance."
+    )
+
+
+@mcp.prompt(
+    name="mireye_solar_siting_report",
+    title="Mireye Solar Siting Report",
+    description="Assess solar siting signals using the solar_siting preset.",
+)
+def _mireye_solar_siting_report_prompt(lat: str, lng: str) -> str:
+    """Assess solar siting signals for a coordinate."""
+    return (
+        f"Call `mireye_fetch` with lat={lat}, lng={lng}, preset='solar_siting'. "
+        "Summarize solar irradiance and PV yield potential, optimal tilt, "
+        "terrain/soil suitability, nearby utility-scale solar facilities, and "
+        "land-use constraints (prime farmland, BLM/protected status). Include "
+        "provenance and confidence."
+    )
+
+
+@mcp.prompt(
+    name="mireye_wind_siting_report",
+    title="Mireye Wind Siting Report",
+    description="Assess wind siting signals using the wind_siting preset.",
+)
+def _mireye_wind_siting_report_prompt(lat: str, lng: str) -> str:
+    """Assess wind siting signals for a coordinate."""
+    return (
+        f"Call `mireye_fetch` with lat={lat}, lng={lng}, preset='wind_siting'. "
+        "Summarize wind speed and power density at hub heights, capacity "
+        "factor, nearby wind projects/turbines, interconnection distance, and "
+        "siting constraints (special-use airspace, golden eagle nest density, "
+        "prime farmland, nearby housing). Include provenance and confidence."
+    )
+
+
+@mcp.prompt(
+    name="mireye_storage_siting_report",
+    title="Mireye Storage Siting Report",
+    description="Assess battery storage siting signals using the storage_siting preset.",
+)
+def _mireye_storage_siting_report_prompt(lat: str, lng: str) -> str:
+    """Assess battery storage siting signals for a coordinate."""
+    return (
+        f"Call `mireye_fetch` with lat={lat}, lng={lng}, "
+        "preset='storage_siting'. Summarize grid interconnection proximity "
+        "(substations, transmission, interconnection queue capacity), nearby "
+        "generation, electricity pricing, and terrain/soil suitability. "
+        "Include provenance and confidence."
+    )
+
+
+@mcp.prompt(
+    name="mireye_data_center_siting_report",
+    title="Mireye Data Center Siting Report",
+    description="Assess data center siting signals using the data_center_siting preset.",
+)
+def _mireye_data_center_siting_report_prompt(lat: str, lng: str) -> str:
+    """Assess data center siting signals for a coordinate."""
+    return (
+        f"Call `mireye_fetch` with lat={lat}, lng={lng}, "
+        "preset='data_center_siting'. Summarize power availability and "
+        "pricing (substations, generation mix, egrid emissions), "
+        "interconnection queue capacity, cooling/water resources, "
+        "connectivity (fiber, 5G, submarine cable), and siting risk factors "
+        "(flood zone, air quality, hazardous/brownfield sites, nearby "
+        "housing). Note any partial_failures. Include provenance and "
+        "confidence."
+    )
+
+
+@mcp.prompt(
+    name="mireye_grid_interconnect_report",
+    title="Mireye Grid Interconnect Report",
+    description="Assess interconnection signals using the grid_interconnect preset.",
+)
+def _mireye_grid_interconnect_report_prompt(lat: str, lng: str) -> str:
+    """Assess grid interconnection signals for a coordinate."""
+    return (
+        f"Call `mireye_fetch` with lat={lat}, lng={lng}, "
+        "preset='grid_interconnect'. Summarize substation and transmission "
+        "access, interconnection queue capacity by ISO/RTO, nearby "
+        "generation, and transmission redundancy. Include provenance and "
+        "confidence."
+    )
+
+
+@mcp.prompt(
+    name="mireye_natural_hazard_report",
+    title="Mireye Natural Hazard Report",
+    description="Assess natural hazard signals using the natural_hazard preset.",
+)
+def _mireye_natural_hazard_report_prompt(lat: str, lng: str) -> str:
+    """Assess natural hazard signals for a coordinate."""
+    return (
+        f"Call `mireye_fetch` with lat={lat}, lng={lng}, "
+        "preset='natural_hazard'. Summarize seismic (PGA, design category), "
+        "design wind speed, wildfire/tornado/hail/lightning frequency, "
+        "landslide susceptibility, floodplain status, and dam-proximity "
+        "risk. Include provenance and confidence."
+    )
+
+
 def main(argv: list[str] | None = None) -> None:
     argv = sys.argv[1:] if argv is None else argv
     if argv:
