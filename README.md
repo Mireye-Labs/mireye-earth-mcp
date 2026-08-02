@@ -30,13 +30,15 @@ it uses `mireye-mcp login` or `MIREYE_BEARER_TOKEN` for credentials.
 
 ## What the agent gets
 
-Three tools, all prefixed `mireye_` so they sort together and don't
+Four tools, all prefixed `mireye_` so they sort together and don't
 collide with generic `ask` / `fetch` tools from other MCP servers:
 
-| Tool            | When the agent should call it                                                                  |
-|-----------------|------------------------------------------------------------------------------------------------|
-| `mireye_ask`    | The caller asked a question about a US place ("is this in a flood zone?", "wildfire risk?").   |
-| `mireye_fetch`  | The caller wants specific named fields ("elevation and slope here") or is powering a workflow. |
+| Tool             | When the agent should call it                                                                  |
+|------------------|------------------------------------------------------------------------------------------------|
+| `mireye_ask`     | The caller asked a question about a US place ("is this in a flood zone?", "wildfire risk?").   |
+| `mireye_fetch`   | The caller wants specific named fields ("elevation and slope here") or is powering a workflow. |
+| `mireye_geocode` | The caller gave an address and just wants the coordinate + its quality, nothing else. |
+| `mireye_lookup` | The input might be ambiguous, isn't a clean address (a coordinate or an APN), or a parcel is wanted. |
 
 Catalog context is exposed as MCP resources instead of extra tools:
 
@@ -127,8 +129,8 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json`
 }
 ```
 
-Restart Claude Desktop. The three tools (`mireye_ask`, `mireye_fetch`,
-`mireye_geocode`)
+Restart Claude Desktop. The four tools (`mireye_ask`, `mireye_fetch`,
+`mireye_geocode`, `mireye_lookup`)
 appear under the 🔌 menu, with catalog resources and prompts available to
 clients that surface those MCP primitives.
 

@@ -1038,6 +1038,41 @@ async def mireye_geocode(address: MireyeAddress) -> dict[str, Any]:
     return await _post("/v1/geocode", {"address": address}, tool_name="mireye_geocode")
 
 
+MireyeResolveInput = Annotated[  # kept the pre-rename name deliberately -- see resolve.py's
+    # docstring: the /v1/lookup rename is HTTP-surface-only, internals stay named "resolve".
+    str,
+    Field(
+        min_length=1,
+        max_length=256,
+        description=(
+            "US street address, \"lat,lng\" coordinate pair, or APN. Include a "
+            "city+state or a ZIP for an address -- the upstream cannot place a "
+            "bare street line."
+        ),
+    ),
+]
+
+
+@mcp.tool(
+    title="Resolve a Location to Canonical Join Keys",
+    annotations=READ_ONLY_TOOL_ANNOTATIONS,
+    structured_output=True,
+)
+async def mireye_lookup(
+    input: MireyeResolveInput,
+    include_parcel: bool = True,
+) -> dict[str, Any]:
+    """Turn a messy human locator (address, "lat,lng", or APN) into canonical join keys: a coordinate, resolved address, and -- when the geocode is parcel-quality -- a parcel (id, boundary, owner). Unlike mireye_geocode, this detects genuine ambiguity across multiple candidate matches instead of trusting a single top result, so an underspecified input like '1100 King St W, Toronto' returns disposition='clarify' with candidates instead of silently landing on the wrong Toronto. ALWAYS check `disposition` first: 'resolved' carries a coordinate and confidence (plus a parcel when safe); 'clarify' means the input is genuinely ambiguous -- present the candidates to the user, never auto-pick one; 'no_match' is an honest failure with a `reason`. A parcel-lookup failure never demotes a good geocode -- 'resolved' can still come back with `parcel_unavailable: true` and a `parcel_unavailable_reason` (e.g. the vendor's own quota being exhausted) rather than an error. Swapped coordinates (e.g. lng where lat belongs) are rejected as a bounds error, never silently treated as a nearest-match. APN-only lookup is not supported yet -- supply an address or coordinate. A 'resolved' response also carries free area context gathered concurrently with the parcel lookup: jurisdiction codes (state, block/block-group, congressional district, CBSA/metro area) alongside county/tract, elevation and FEMA flood-zone fields, a county_market bundle (population, growth, employment, home-price change, median income), Opportunity Zone status, and an IANA timezone -- every one of these degrades independently to null on its own failure and never blocks the primary coordinate/parcel answer."""  # noqa: E501
+    # Thin proxy, like every tool here — no resolve logic crosses into this
+    # package. Keep the signature and docstring in step with api/main.py's
+    # mireye_lookup; tests/test_mcp.py asserts surface parity.
+    return await _post(
+        "/v1/lookup",
+        {"input": input, "include_parcel": include_parcel},
+        tool_name="mireye_lookup",
+    )
+
+
 # Claude Code surfaces MCP prompts as slash commands under the form
 # ``/mcp__<server>__<prompt>``. With our server named ``mireye-earth`` these
 # render as ``/mcp__mireye-earth__mireye_ask`` and
