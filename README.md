@@ -30,7 +30,7 @@ it uses `mireye-mcp login` or `MIREYE_BEARER_TOKEN` for credentials.
 
 ## What the agent gets
 
-Four tools, all prefixed `mireye_` so they sort together and don't
+Six tools, all prefixed `mireye_` so they sort together and don't
 collide with generic `ask` / `fetch` tools from other MCP servers:
 
 | Tool             | When the agent should call it                                                                  |
@@ -39,6 +39,8 @@ collide with generic `ask` / `fetch` tools from other MCP servers:
 | `mireye_fetch`   | The caller wants specific named fields ("elevation and slope here") or is powering a workflow. |
 | `mireye_geocode` | The caller gave an address and just wants the coordinate + its quality, nothing else. |
 | `mireye_lookup` | The input might be ambiguous, isn't a clean address (a coordinate or an APN), or a parcel is wanted. |
+| `mireye_request_field` | The catalog doesn't have the field the caller needs — describe it in plain language plus example locations and either get a live match now or a `request_id` to build it. |
+| `mireye_field_request_status` | Poll a `request_id` from `mireye_request_field` for status, queue position, ETA, and (once `live`) the `resume` call. |
 
 Catalog context is exposed as MCP resources instead of extra tools:
 
@@ -50,10 +52,33 @@ Catalog context is exposed as MCP resources instead of extra tools:
 | `mireye://field/{name}` | One field definition. |
 | `mireye://preset/{name}` | One preset expansion. |
 
-Workflow prompts are also registered: `mireye_ask`, `mireye_fetch`,
-`mireye_site_report`, `mireye_flood_check`, `mireye_wildfire_underwrite`,
-and `mireye_pick_fields`. Claude Code surfaces MCP prompts as slash
-commands under the form `/mcp__<server>__<prompt>`.
+Workflow prompts are also registered — 22 in total. Claude Code surfaces
+MCP prompts as slash commands under the form `/mcp__<server>__<prompt>`.
+
+| Prompt | What it does |
+|--------|--------------|
+| `mireye_ask` | Call `mireye_ask` with a lat/lng and question. |
+| `mireye_fetch` | Call `mireye_fetch` with a lat/lng and optional fields/preset. |
+| `mireye_lookup` | Call `mireye_lookup` with an address/`lat,lng`/APN, noting the `disposition` handling. |
+| `mireye_request_field` | File a field request with `mireye_request_field`, noting the `disposition` handling. |
+| `mireye_field_request_status` | Poll a field request's status with `mireye_field_request_status`. |
+| `mireye_fields` | Browse or search the field catalog. |
+| `mireye_pick_fields` | Choose the smallest useful field set for a free-text question. |
+| `mireye_site_report` | Site report via the `site_selection` preset. |
+| `mireye_flood_check` | Flood-relevant signals via the `flood_risk` preset. |
+| `mireye_wildfire_underwrite` | Wildfire underwriting signals via the `wildfire_underwrite` preset. |
+| `mireye_terrain_report` | Terrain signals via the `terrain` preset. |
+| `mireye_land_cover_report` | Land cover signals via the `land_cover` preset. |
+| `mireye_building_lookup_report` | Primary building details via the `building_lookup` preset. |
+| `mireye_points_of_interest_report` | Nearby amenities via the `points_of_interest` preset. |
+| `mireye_utilities_report` | Utility infrastructure via the `utilities` preset. |
+| `mireye_boundaries_report` | Political/census boundaries via the `boundaries` preset. |
+| `mireye_solar_siting_report` | Solar siting signals via the `solar_siting` preset. |
+| `mireye_wind_siting_report` | Wind siting signals via the `wind_siting` preset. |
+| `mireye_storage_siting_report` | Battery storage siting signals via the `storage_siting` preset. |
+| `mireye_data_center_siting_report` | Data center siting signals via the `data_center_siting` preset. |
+| `mireye_grid_interconnect_report` | Interconnection signals via the `grid_interconnect` preset. |
+| `mireye_natural_hazard_report` | Natural hazard signals via the `natural_hazard` preset. |
 
 There is no third `list_fields` tool. Agents that need the catalog should
 read the MCP resources above; the stdio adapter backs them with
@@ -129,8 +154,9 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json`
 }
 ```
 
-Restart Claude Desktop. The four tools (`mireye_ask`, `mireye_fetch`,
-`mireye_geocode`, `mireye_lookup`)
+Restart Claude Desktop. The six tools (`mireye_ask`, `mireye_fetch`,
+`mireye_geocode`, `mireye_lookup`, `mireye_request_field`,
+`mireye_field_request_status`)
 appear under the 🔌 menu, with catalog resources and prompts available to
 clients that surface those MCP primitives.
 

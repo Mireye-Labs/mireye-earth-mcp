@@ -571,6 +571,50 @@ async def _post(path: str, payload: dict[str, Any], *, tool_name: str) -> dict[s
     return resp.json()
 
 
+async def _get(path: str, *, tool_name: str) -> dict[str, Any]:
+    """GET JSON from the Mireye API. Same error-shape contract as `_post`."""
+    url = f"{MIREYE_BASE_URL}{path}"
+    headers = _auth_headers(_configured_token(), base_url=MIREYE_BASE_URL)
+    if not headers:
+        raise _tool_error(
+            code="mcp_auth_required",
+            message=(
+                "Mireye MCP is not authenticated. Run `mireye-mcp login` "
+                f"or set {TOKEN_ENV} to an API bearer token."
+            ),
+            tool_name=tool_name,
+            http_status=401,
+        )
+    headers.update({
+        "X-Mireye-Client-Surface": "mcp_proxy",
+        "X-Mireye-MCP-Tool": tool_name,
+        "X-Mireye-MCP-Call-ID": f"mcp_call_{uuid4().hex}",
+        "X-Mireye-MCP-Package-Version": _package_version(),
+    })
+    try:
+        async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+            resp = await client.get(url, headers=headers)
+    except httpx.TimeoutException as exc:
+        raise _tool_error(
+            code="upstream_timeout",
+            message=f"Mireye API timed out after {TIMEOUT_SECONDS:g} seconds.",
+            tool_name=tool_name,
+            retryable=True,
+        ) from exc
+    except httpx.HTTPError as exc:
+        raise _tool_error(
+            code="upstream_unreachable",
+            message=str(exc),
+            tool_name=tool_name,
+            retryable=True,
+        ) from exc
+    rid = resp.headers.get("X-Request-ID", "-")
+    _log("tool_call", path=path, status=resp.status_code, request_id=rid)
+    if resp.is_error:
+        raise _response_error(resp, tool_name=tool_name)
+    return resp.json()
+
+
 def _catalog_payload() -> dict[str, Any]:
     global _catalog_cache, _catalog_etag, _catalog_fetched_monotonic
 
@@ -1073,6 +1117,70 @@ async def mireye_lookup(
     )
 
 
+@mcp.tool(
+    title="Request a New Mireye Field",
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=True,
+    ),
+    structured_output=True,
+)
+async def mireye_request_field(
+    description: str,
+    example_locations: list[dict[str, Any]],
+    use_case: str | None = None,
+    decision_threshold: str | None = None,
+    deadline: str | None = None,
+    requested_fields: list[str] | None = None,
+    idempotency_key: str | None = None,
+    context_blob: str | None = None,
+    callback_webhook_url: str | None = None,
+    callback_email: str | None = None,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Ask Mireye for a data field it doesn't have yet, in plain language, at one or more example locations. If the catalog already answers it you get the value now with a citation (disposition 'matched_existing'/'partial') and never spend a build; if something close exists you get 'near_miss_confirm' to accept or reject; otherwise the field is queued to build and you get a request_id to poll with mireye_field_request_status. ALWAYS pass idempotency_key for agent-originated requests: the same key replays the existing request's state instead of filing a second build. Answering use_case/decision_threshold (what decision this feeds, and the value that flips it) is optional but sharply improves match quality and build speed. example_locations (1-10 entries) each carry exactly one of address, lat+lng, or polygon, plus optional claimed_value/note -- see docs.mireye.ai/api-reference/field-requests for the full entry shape. requested_fields optionally pre-splits a bundled ask into atomic sub-questions (plain-language asks); the server decomposes bundles anyway. extra carries the rarer structured fields verbatim (area_of_interest, expected_volume, freshness, constraints, known_sources, output_preference) -- same doc has their shapes. A 'rejected' disposition carries a typed rejection_code and routing_hint, never a bare no; a genuinely ambiguous location returns a stateless 'clarify' with candidates instead of guessing. Filing a request never spends /v1/fetch credits; plans carry a separate included build allowance."""  # noqa: E501
+    # Thin proxy, like every tool here — no intake/screening logic crosses
+    # into this package. Keep the signature and docstring in step with
+    # api/main.py's mireye_request_field; tests/test_mcp.py asserts parity.
+    body: dict[str, Any] = {
+        "description": description,
+        "example_locations": example_locations,
+    }
+    if use_case is not None:
+        body["use_case"] = use_case
+    if decision_threshold is not None:
+        body["decision_threshold"] = decision_threshold
+    if deadline is not None:
+        body["deadline"] = deadline
+    if requested_fields:
+        body["requested_fields"] = [{"ask": ask} for ask in requested_fields]
+    if idempotency_key is not None:
+        body["idempotency_key"] = idempotency_key
+    if context_blob is not None:
+        body["context_blob"] = context_blob
+    if callback_webhook_url is not None or callback_email is not None:
+        body["callback"] = {"webhook_url": callback_webhook_url, "email": callback_email}
+    if extra:
+        body.update(extra)
+    return await _post("/v1/field-requests", body, tool_name="mireye_request_field")
+
+
+@mcp.tool(
+    title="Poll a Mireye Field Request",
+    annotations=READ_ONLY_TOOL_ANNOTATIONS,
+    structured_output=True,
+)
+async def mireye_field_request_status(request_id: str) -> dict[str, Any]:
+    """Poll the status of a field request filed with mireye_request_field: status, queue position, the promised estimated_ready_at (fixed at acceptance, never recomputed on poll), and -- once status is 'live' -- the resume call (a ready-to-send /v1/fetch request) that answers the original ask. Store request_id in durable task state, not conversation context: builds run on a scale of hours and the filing session will likely be gone before one finishes. Status vocabulary: 'received'/'screening' (still being screened; check waiting_on -- 'operator' means screening failed and a human has to look), 'matched' (the catalog already answered it, use resume), 'awaiting_confirm' (a near-miss or clarify needs you), 'rejected' (typed codes in disposition, terminal), 'queued'/'claimed'/'building'/'in_review'/'approved'/'publishing' (a build is in progress), 'live' (done, resume works now), 'blocked'/'expired' (terminal, no build). Requests are visible only to the credential that filed them; an id that doesn't exist -- or belongs to someone else -- is the same 404, never a 403 (a 403 would confirm the id exists)."""  # noqa: E501
+    # Thin proxy, like every tool here. Keep the signature and docstring in
+    # step with api/main.py's mireye_field_request_status; tests/test_mcp.py
+    # asserts parity.
+    encoded = urllib.parse.quote(request_id, safe="")
+    return await _get(f"/v1/field-requests/{encoded}", tool_name="mireye_field_request_status")
+
+
 # Claude Code surfaces MCP prompts as slash commands under the form
 # ``/mcp__<server>__<prompt>``. With our server named ``mireye-earth`` these
 # render as ``/mcp__mireye-earth__mireye_ask`` and
@@ -1159,6 +1267,275 @@ def _mireye_pick_fields_prompt(question: str) -> str:
         "Read `mireye://catalog/fields` and `mireye://catalog/presets`, then "
         f"choose the smallest useful set of fields for this question: {question!r}. "
         "Return the selected field names, any useful preset, and a short rationale."
+    )
+
+
+@mcp.prompt(
+    name="mireye_lookup",
+    title="Mireye Lookup",
+    description="Resolve an address, \"lat,lng\" pair, or APN to canonical join keys.",
+)
+def _mireye_lookup_prompt(input: str, include_parcel: str = "") -> str:
+    """Resolve a locator to a coordinate, resolved address, and (when available) a parcel."""
+    parcel_clause = ""
+    if include_parcel.strip():
+        include = include_parcel.strip().lower() in {"1", "true", "yes"}
+        parcel_clause = f", include_parcel={include}"
+    return (
+        f"Call the `mireye_lookup` tool with input={input!r}{parcel_clause}. "
+        "Check `disposition` first: 'resolved' carries a coordinate (and a "
+        "parcel when available); 'clarify' means the input is genuinely "
+        "ambiguous — present the candidates to the user, never auto-pick one; "
+        "'no_match' is an honest failure with a reason. Include provenance and "
+        "confidence in the summary."
+    )
+
+
+@mcp.prompt(
+    name="mireye_request_field",
+    title="Request a New Mireye Field",
+    description="File a request for a data field Mireye doesn't have yet.",
+)
+def _mireye_request_field_prompt(description: str, location: str, idempotency_key: str = "") -> str:
+    """Ask Mireye to index a new field, describing the ask and one example location."""
+    idem_clause = f", idempotency_key={idempotency_key!r}" if idempotency_key.strip() else ""
+    return (
+        f"Call the `mireye_request_field` tool with description={description!r}, "
+        f"example_locations=[{{'address': {location!r}}}]{idem_clause}. Always set "
+        "an idempotency_key if the caller might retry. Read the response's "
+        "`disposition`: 'matched_existing'/'partial' means the answer already "
+        "exists (use `resume`); 'near_miss_confirm' needs the user to accept or "
+        "reject the closest existing field; 'accepted_new' means it's queued — "
+        "give the user the `request_id` and tell them to check back with "
+        "`mireye_field_request_status`; 'rejected' carries a typed reason and "
+        "routing hint. If the response is a stateless location `clarify`, "
+        "present the candidates and never auto-pick one."
+    )
+
+
+@mcp.prompt(
+    name="mireye_field_request_status",
+    title="Poll a Mireye Field Request",
+    description="Check the status of a field request by its request_id.",
+)
+def _mireye_field_request_status_prompt(request_id: str) -> str:
+    """Poll a previously filed field request for its current status."""
+    return (
+        f"Call the `mireye_field_request_status` tool with request_id={request_id!r}. "
+        "If `status` is 'live', use the `resume` call to fetch the answer now. "
+        "If it's 'awaiting_confirm', tell the user what's waiting on them. If "
+        "it's still building (`queued`/`claimed`/`building`/`in_review`/"
+        "`approved`/`publishing`), report `queue_position` and "
+        "`estimated_ready_at` and suggest checking back later. If it's "
+        "'blocked'/'expired'/'rejected', report that it's terminal."
+    )
+
+
+@mcp.prompt(
+    name="mireye_fields",
+    title="Browse Mireye Fields",
+    description="Browse or search the Mireye field catalog by name, description, or layer.",
+)
+def _mireye_fields_prompt(search: str = "") -> str:
+    """Browse the Mireye field catalog, optionally filtered by a search term."""
+    if search.strip():
+        return (
+            f"Read `mireye://catalog/fields` and list every field whose name or "
+            f"description matches {search.strip()!r}, each with a one-line "
+            "description and which layer/presets it belongs to."
+        )
+    return (
+        "Read `mireye://catalog/fields` and summarize the available fields "
+        "grouped by layer (terrain, land_cover, built_environment, utilities, "
+        "parcels, climate, hazards), with a count per layer and a few "
+        "representative field names in each group."
+    )
+
+
+@mcp.prompt(
+    name="mireye_terrain_report",
+    title="Mireye Terrain Report",
+    description="Summarize terrain signals using the terrain preset.",
+)
+def _mireye_terrain_report_prompt(lat: str, lng: str) -> str:
+    """Summarize terrain signals for a coordinate."""
+    return (
+        f"Call `mireye_fetch` with lat={lat}, lng={lng}, preset='terrain'. "
+        "Summarize elevation, slope, aspect, distance to the coast, and "
+        "soil/bedrock characteristics. Include provenance and confidence."
+    )
+
+
+@mcp.prompt(
+    name="mireye_land_cover_report",
+    title="Mireye Land Cover Report",
+    description="Summarize land cover signals using the land_cover preset.",
+)
+def _mireye_land_cover_report_prompt(lat: str, lng: str) -> str:
+    """Summarize land cover signals for a coordinate."""
+    return (
+        f"Call `mireye_fetch` with lat={lat}, lng={lng}, preset='land_cover'. "
+        "Summarize land cover classification, land use, tree canopy percentage, "
+        "and dominant crop history. Include provenance and confidence."
+    )
+
+
+@mcp.prompt(
+    name="mireye_building_lookup_report",
+    title="Mireye Building Lookup Report",
+    description="Summarize the primary building using the building_lookup preset.",
+)
+def _mireye_building_lookup_report_prompt(lat: str, lng: str) -> str:
+    """Summarize the primary building at a coordinate."""
+    return (
+        f"Call `mireye_fetch` with lat={lat}, lng={lng}, "
+        "preset='building_lookup'. Summarize the primary building's type, "
+        "height, floor count, and footprint area. Include provenance and "
+        "confidence."
+    )
+
+
+@mcp.prompt(
+    name="mireye_points_of_interest_report",
+    title="Mireye Points of Interest Report",
+    description="Summarize nearby amenities using the points_of_interest preset.",
+)
+def _mireye_points_of_interest_report_prompt(lat: str, lng: str) -> str:
+    """Summarize nearby points of interest for a coordinate."""
+    return (
+        f"Call `mireye_fetch` with lat={lat}, lng={lng}, "
+        "preset='points_of_interest'. Summarize nearby hospitals, fire "
+        "stations, schools, grocery stores, lodging, dining (restaurants, "
+        "cafes, bars), gas stations, pharmacies, banks, and shopping, with "
+        "distances, plus overall POI density within 1km. Include provenance."
+    )
+
+
+@mcp.prompt(
+    name="mireye_utilities_report",
+    title="Mireye Utilities Report",
+    description="Summarize utility infrastructure using the utilities preset.",
+)
+def _mireye_utilities_report_prompt(lat: str, lng: str) -> str:
+    """Summarize utility infrastructure for a coordinate."""
+    return (
+        f"Call `mireye_fetch` with lat={lat}, lng={lng}, preset='utilities'. "
+        "Summarize the nearest power plant, transmission line access "
+        "(voltage, status, owner), gas pipeline proximity, and sewer service "
+        "availability. Include provenance and confidence."
+    )
+
+
+@mcp.prompt(
+    name="mireye_boundaries_report",
+    title="Mireye Boundaries Report",
+    description="Summarize political and census boundaries using the boundaries preset.",
+)
+def _mireye_boundaries_report_prompt(lat: str, lng: str) -> str:
+    """Summarize political and census boundaries for a coordinate."""
+    return (
+        f"Call `mireye_fetch` with lat={lat}, lng={lng}, preset='boundaries'. "
+        "Summarize the region, county, locality, and census tract the "
+        "coordinate falls in. Include provenance."
+    )
+
+
+@mcp.prompt(
+    name="mireye_solar_siting_report",
+    title="Mireye Solar Siting Report",
+    description="Assess solar siting signals using the solar_siting preset.",
+)
+def _mireye_solar_siting_report_prompt(lat: str, lng: str) -> str:
+    """Assess solar siting signals for a coordinate."""
+    return (
+        f"Call `mireye_fetch` with lat={lat}, lng={lng}, preset='solar_siting'. "
+        "Summarize solar irradiance and PV yield potential, optimal tilt, "
+        "terrain/soil suitability, nearby utility-scale solar facilities, and "
+        "land-use constraints (prime farmland, BLM/protected status). Include "
+        "provenance and confidence."
+    )
+
+
+@mcp.prompt(
+    name="mireye_wind_siting_report",
+    title="Mireye Wind Siting Report",
+    description="Assess wind siting signals using the wind_siting preset.",
+)
+def _mireye_wind_siting_report_prompt(lat: str, lng: str) -> str:
+    """Assess wind siting signals for a coordinate."""
+    return (
+        f"Call `mireye_fetch` with lat={lat}, lng={lng}, preset='wind_siting'. "
+        "Summarize wind speed and power density at hub heights, capacity "
+        "factor, nearby wind projects/turbines, interconnection distance, and "
+        "siting constraints (special-use airspace, golden eagle nest density, "
+        "prime farmland, nearby housing). Include provenance and confidence."
+    )
+
+
+@mcp.prompt(
+    name="mireye_storage_siting_report",
+    title="Mireye Storage Siting Report",
+    description="Assess battery storage siting signals using the storage_siting preset.",
+)
+def _mireye_storage_siting_report_prompt(lat: str, lng: str) -> str:
+    """Assess battery storage siting signals for a coordinate."""
+    return (
+        f"Call `mireye_fetch` with lat={lat}, lng={lng}, "
+        "preset='storage_siting'. Summarize grid interconnection proximity "
+        "(substations, transmission, interconnection queue capacity), nearby "
+        "generation, electricity pricing, and terrain/soil suitability. "
+        "Include provenance and confidence."
+    )
+
+
+@mcp.prompt(
+    name="mireye_data_center_siting_report",
+    title="Mireye Data Center Siting Report",
+    description="Assess data center siting signals using the data_center_siting preset.",
+)
+def _mireye_data_center_siting_report_prompt(lat: str, lng: str) -> str:
+    """Assess data center siting signals for a coordinate."""
+    return (
+        f"Call `mireye_fetch` with lat={lat}, lng={lng}, "
+        "preset='data_center_siting'. Summarize power availability and "
+        "pricing (substations, generation mix, egrid emissions), "
+        "interconnection queue capacity, cooling/water resources, "
+        "connectivity (fiber, 5G, submarine cable), and siting risk factors "
+        "(flood zone, air quality, hazardous/brownfield sites, nearby "
+        "housing). Note any partial_failures. Include provenance and "
+        "confidence."
+    )
+
+
+@mcp.prompt(
+    name="mireye_grid_interconnect_report",
+    title="Mireye Grid Interconnect Report",
+    description="Assess interconnection signals using the grid_interconnect preset.",
+)
+def _mireye_grid_interconnect_report_prompt(lat: str, lng: str) -> str:
+    """Assess grid interconnection signals for a coordinate."""
+    return (
+        f"Call `mireye_fetch` with lat={lat}, lng={lng}, "
+        "preset='grid_interconnect'. Summarize substation and transmission "
+        "access, interconnection queue capacity by ISO/RTO, nearby "
+        "generation, and transmission redundancy. Include provenance and "
+        "confidence."
+    )
+
+
+@mcp.prompt(
+    name="mireye_natural_hazard_report",
+    title="Mireye Natural Hazard Report",
+    description="Assess natural hazard signals using the natural_hazard preset.",
+)
+def _mireye_natural_hazard_report_prompt(lat: str, lng: str) -> str:
+    """Assess natural hazard signals for a coordinate."""
+    return (
+        f"Call `mireye_fetch` with lat={lat}, lng={lng}, "
+        "preset='natural_hazard'. Summarize seismic (PGA, design category), "
+        "design wind speed, wildfire/tornado/hail/lightning frequency, "
+        "landslide susceptibility, floodplain status, and dam-proximity "
+        "risk. Include provenance and confidence."
     )
 
 
