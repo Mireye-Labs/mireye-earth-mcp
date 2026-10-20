@@ -43,6 +43,7 @@ import importlib.metadata
 import json
 import math
 import os
+import re
 import sys
 import time
 import urllib.parse
@@ -53,7 +54,7 @@ from uuid import uuid4
 import httpx
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from ._generated_presets import PRESET_NAMES, MireyePreset
 from .enrich import EnrichRequest
@@ -146,6 +147,39 @@ MireyeFields = Annotated[
 # other schema here. Keep field constraints and docstrings in step with the
 # real schemas; tests/test_mcp.py asserts surface parity.
 Locator = str
+MAX_TOTAL_CALCS = 10_000
+MAX_ADDRESS_LOCATORS = 25
+_COORD_RE = re.compile(r"^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$")
+
+
+def _n_address_locators(locators: list[Locator]) -> int:
+    """Mirror compute.local's coordinate test for request-shape validation only."""
+    addresses = 0
+    for locator in locators:
+        match = _COORD_RE.match(locator)
+        if match is None:
+            addresses += 1
+            continue
+        lat, lng = float(match.group(1)), float(match.group(2))
+        addresses += not (-90.0 <= lat <= 90.0 and -180.0 <= lng <= 180.0)
+    return addresses
+
+
+def _require_proximity_caps(
+    origins: list[Locator], targets: list[Locator], *, target_role: str,
+) -> None:
+    # These cross-field limits cannot be expressed by the per-list JSON Schema
+    # bounds. Mirror the hosted validators before any HTTP request or billing.
+    for value, cap, what in (
+        (len(origins) * len(targets), MAX_TOTAL_CALCS, f"origins x {target_role}"),
+        (_n_address_locators(origins) + _n_address_locators(targets),
+         MAX_ADDRESS_LOCATORS, "address-form locators"),
+    ):
+        if value > cap:
+            raise ValueError(
+                f"{what} = {value} exceeds the maximum of {cap} per request "
+                f"-- split the request into smaller batches"
+            )
 
 # Mirrors compute.schemas.MAX_CREDITS_FLOOR / MAX_CREDITS_CAP / the shared
 # _MAX_CREDITS_FIELD. It rides EVERY op there, so it must ride every op here:
@@ -191,6 +225,11 @@ class MireyeDistanceOp(BaseModel):
     )
     max_credits: MireyeMaxCredits = None
 
+    @model_validator(mode="after")
+    def _check_caps(self) -> MireyeDistanceOp:
+        _require_proximity_caps(self.origins, self.destinations, target_role="destinations")
+        return self
+
 
 class MireyeNearestOp(BaseModel):
     """Top-N candidates from a curated set, ranked by driving duration (or
@@ -214,6 +253,11 @@ class MireyeScreenOp(BaseModel):
     max_minutes: int = Field(ge=1, le=300)
     min_minutes: int | None = None
     max_credits: MireyeMaxCredits = None
+
+    @model_validator(mode="after")
+    def _check_caps(self) -> MireyeScreenOp:
+        _require_proximity_caps(self.origins, self.anchors, target_role="anchors")
+        return self
 
 
 class MireyeLaborShedOp(BaseModel):
@@ -438,6 +482,9 @@ _ROOT_LEVEL_DETAIL_KEYS: tuple[str, ...] = (
     "caller_guidance",
     "unresolved_accuracy_types",
     "retry_after_seconds",
+    "retry_after_s",
+    "retry_after",
+    "billing_degraded",
     # The meter refusals' fields (402 credits_exhausted /
     # prepaid_balance_insufficient / prepaid_frozen / auto_topup_suspended /
     # account_paused, 429, 503 billing_state_unavailable). The hosted server
@@ -607,9 +654,16 @@ def _response_error(
         elif detail:
             message = str(detail)
             context = {"detail": detail}
-    # MCP has no HTTP headers. Preserve the server's retry delay so agents
-    # can back off on account/capacity refusals on either transport. Explicit
-    # response detail wins; ignore malformed/unbounded header values.
+    # Match hosted billing errors: the body delay takes precedence, and the
+    # raw header preserves both delta-seconds and HTTP-date credit reset times.
+    if context.get("retry_after_s") is not None:
+        context["retry_after_seconds"] = context["retry_after_s"]
+    if "Retry-After" in resp.headers:
+        context["retry_after"] = resp.headers["Retry-After"]
+    if resp.headers.get("X-Mireye-Billing-Degraded") == "1":
+        context["billing_degraded"] = True
+    # Retain the bounded numeric convenience field for capacity errors whose
+    # response detail supplies no explicit delay.
     retry_after = resp.headers.get("Retry-After", "")
     if (
         "retry_after_seconds" not in context

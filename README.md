@@ -356,6 +356,16 @@ Fetch examples: `elevation_m` is `elevation`, `floodplain` is
 **HTTP 4xx/5xx in general.** Tool errors include actionable JSON fields
 such as `code`, `message`, `http_status`, `request_id`, `tool`, and
 `retryable`. Agents should retry only when `retryable` is true.
+Billing errors preserve `retry_after_seconds` when supplied and the raw
+`retry_after` header, which can be seconds or an HTTP-date credit reset time.
+`billing_degraded: true` means the billing service used fallback counters or
+an estimated period. These fields appear at the error root on both transports.
+
+**Proximity request limits.** `distance` and `screen` accept at most 10,000
+origin-by-destination or origin-by-anchor pairs and 25 address-form locators
+across both lists. The adapter applies the same validation as the hosted API
+before sending a request. Split larger batches or supply coordinates for
+addresses you already know.
 
 **Auth errors.** `401` means the MCP server has no token, the token
 expired, or the token was revoked. Run `mireye-mcp login` again,
