@@ -15,6 +15,7 @@ Configuration (environment variables):
                       plain http except to loopback hosts
                       (localhost/127.0.0.1/[::1]).
     MIREYE_TIMEOUT_S  Per-request timeout in seconds. Defaults to 120.
+                      Search uses at least 210 seconds for its 180-second budget.
                       mireye_ask is LLM-backed with a ~110 s server-side
                       deadline, so the client timeout must exceed it — a
                       shorter one abandons requests the server still bills.
@@ -46,15 +47,17 @@ import sys
 import time
 import urllib.parse
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from uuid import uuid4
 
 import httpx
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
-from pydantic import Field
+from pydantic import BaseModel, Field
 
 from ._generated_presets import PRESET_NAMES, MireyePreset
+from .enrich import EnrichRequest
+from .search import SearchRequest
 
 DEFAULT_BASE_URL = "https://api.mireye.com"
 MIREYE_BASE_URL: str = os.getenv("MIREYE_BASE_URL", DEFAULT_BASE_URL).rstrip("/")
@@ -64,6 +67,8 @@ MIREYE_BASE_URL: str = os.getenv("MIREYE_BASE_URL", DEFAULT_BASE_URL).rstrip("/"
 # fetch-only workloads if a tighter bound is wanted.
 TIMEOUT_SECONDS: float = float(os.getenv("MIREYE_TIMEOUT_S", "120"))
 TIMEOUT: httpx.Timeout = httpx.Timeout(TIMEOUT_SECONDS)
+# Search has a 180-second server budget, including optional full enrichment.
+SEARCH_TIMEOUT_SECONDS = 210.0
 TOKEN_ENV = "MIREYE_BEARER_TOKEN"
 CREDENTIALS_FILE_ENV = "MIREYE_MCP_CREDENTIALS_FILE"
 MAX_FIELDS = 50
@@ -94,9 +99,14 @@ MireyeLat = Annotated[
 MireyeLng = Annotated[
     float,
     Field(
-        ge=US_ENVELOPE["lng_min"],
-        le=US_ENVELOPE["lng_max"],
-        description="Longitude in decimal degrees inside the supported US envelope.",
+        # The pair-aware validator below decides coverage. The scalar schema
+        # must admit western-Aleutian longitudes so they reach that check.
+        ge=-180.0,
+        le=180.0,
+        description=(
+            "Longitude in decimal degrees; supported US coverage is validated "
+            "against latitude."
+        ),
     ),
 ]
 MireyeAddress = Annotated[
@@ -128,6 +138,105 @@ MireyeFields = Annotated[
             "mireye://field/{name} for descriptions."
         ),
     ),
+]
+
+# mireye_proximity's request shape. A deliberate copy of
+# mireye_earth.compute.schemas' discriminated union -- this package stays
+# dependency-light (httpx + mcp only, no mireye_earth import), like every
+# other schema here. Keep field constraints and docstrings in step with the
+# real schemas; tests/test_mcp.py asserts surface parity.
+Locator = str
+
+# Mirrors compute.schemas.MAX_CREDITS_FLOOR / MAX_CREDITS_CAP / the shared
+# _MAX_CREDITS_FIELD. It rides EVERY op there, so it must ride every op here:
+# hosted agents could cap their own spend and stdio agents could not, and the
+# 422 a request over the ceiling gets back tells the caller to pass exactly
+# this field. A labor_shed over a dense metro clears the ceiling routinely (a
+# 15-minute Los Angeles shed prices at 18,792), so the omission made that op
+# unusable from stdio rather than merely expensive.
+MAX_CREDITS_FLOOR = 1
+MAX_CREDITS_CAP = 200_000
+
+MireyeMaxCredits = Annotated[
+    int | None,
+    Field(
+        default=None,
+        ge=MAX_CREDITS_FLOOR,
+        le=MAX_CREDITS_CAP,
+        description=(
+            "Refuse this request if it would cost more than this many credits. "
+            "Defaults to the service ceiling (see MIREYE_PROXIMITY_CREDIT_CEILING); "
+            "raise it to opt into an expensive request, lower it to cap your own "
+            "spend. The refusal is a 422 that states the exact price, and it "
+            "happens BEFORE the driving matrix is charged."
+        ),
+    ),
+]
+
+
+class MireyeDistanceOp(BaseModel):
+    """N origins x M destinations, driving or straightline."""
+
+    op: Literal["distance"]
+    origins: list[Locator] = Field(min_length=1, max_length=500)
+    destinations: list[Locator] = Field(min_length=1, max_length=500)
+    mode: Literal["driving", "straightline"] = "driving"
+    units: Literal["miles", "km"] = Field(
+        default="miles",
+        description=(
+            "Reserved for a future single-unit rendering. `Leg` always returns "
+            "BOTH distance_miles and distance_km regardless of this value -- "
+            "no behavior currently depends on it."
+        ),
+    )
+    max_credits: MireyeMaxCredits = None
+
+
+class MireyeNearestOp(BaseModel):
+    """Top-N candidates from a curated set, ranked by driving duration (or
+    straightline distance in ``straightline`` mode)."""
+
+    op: Literal["nearest"]
+    origin: Locator
+    set: str  # "@airports" | "@substations" | ... -- see the compute tool docstring
+    n: int = Field(default=3, ge=1, le=25)
+    filters: dict[str, float | str] | None = None
+    mode: Literal["driving", "straightline"] = "driving"
+    max_credits: MireyeMaxCredits = None
+
+
+class MireyeScreenOp(BaseModel):
+    """Filter origins by driving-duration proximity to ANY of up to 10 anchors."""
+
+    op: Literal["screen"]
+    origins: list[Locator] = Field(min_length=1, max_length=500)
+    anchors: list[Locator] = Field(min_length=1, max_length=10)
+    max_minutes: int = Field(ge=1, le=300)
+    min_minutes: int | None = None
+    max_credits: MireyeMaxCredits = None
+
+
+class MireyeLaborShedOp(BaseModel):
+    """Civilian labor force + population within a driving-minutes shed of one origin."""
+
+    op: Literal["labor_shed"]
+    origin: Locator
+    minutes: int = Field(ge=5, le=90)
+    max_credits: MireyeMaxCredits = None
+    estimate: bool = Field(
+        default=False,
+        description=(
+            "Price this shed without running or paying for it. The tract "
+            "prefilter that determines the price is free, so the estimate is "
+            "EXACT, not a guess. Returns a LaborShedEstimate; no driving "
+            "matrix is called and no driving credits are charged."
+        ),
+    )
+
+
+MireyeComputeRequest = Annotated[
+    MireyeDistanceOp | MireyeNearestOp | MireyeScreenOp | MireyeLaborShedOp,
+    Field(discriminator="op"),
 ]
 
 SERVER_INSTRUCTIONS = (
@@ -320,6 +429,52 @@ def _json_dumps(data: Any) -> str:
     return json.dumps(data, indent=2, sort_keys=True)
 
 
+# Keys a caller acts on, which therefore must sit at the same level on the
+# hosted and stdio surfaces (asserted by tests/test_mcp.py). `caller_guidance`
+# carries the "say what you inferred" obligation and is useless buried a level
+# down; `unresolved_accuracy_types` tells an agent a `place` tier means it sent
+# a name, not an address.
+_ROOT_LEVEL_DETAIL_KEYS: tuple[str, ...] = (
+    "caller_guidance",
+    "unresolved_accuracy_types",
+    "retry_after_seconds",
+    # The meter refusals' fields (402 credits_exhausted /
+    # prepaid_balance_insufficient / prepaid_frozen / auto_topup_suspended /
+    # account_paused, 429, 503 billing_state_unavailable). The hosted server
+    # puts exactly these at the ROOT (`api.main.BILLING_DETAIL_KEYS`); this
+    # package cannot import `api`, so the list is hand-copied and
+    # tests/test_mcp_prepaid.py fails if it falls behind. An agent on either
+    # transport reads `topup_url` / `billing_url` from the same place.
+    "plan",
+    "used",
+    "included",
+    "resets_at",
+    "upgrade_url",
+    "limit_rpm",
+    "limit",
+    "self_imposed_limit",
+    "shared_pool_exhausted",
+    "records_exhausted",
+    "records_used",
+    "records_included",
+    "prepaid_balance_credits",
+    "prepaid_unavailable_reason",
+    "topup_url",
+    "this_call_credits",
+    "this_call_usd_cents",
+    "balance_credits",
+    "shortfall_credits",
+    "suggested_topup_usd_cents",
+    "auto_topup",
+    "tip",
+    "reason",
+    "plan_debit_unconfirmed",
+    "billing_url",
+    "support_email",
+    "paused",
+)
+
+
 def _mcp_error(
     *,
     code: str,
@@ -346,6 +501,15 @@ def _mcp_error(
         payload["request_id"] = request_id
     if context:
         payload["context"] = context
+    # Remediation fields live at the ROOT on both MCP surfaces. The hosted
+    # server puts them there directly; this adapter otherwise sweeps every
+    # unrecognised detail key into `context`, so a client written against one
+    # transport could not read them on the other. Hoisting (rather than
+    # moving) keeps this adapter's generic `context` shape intact for its
+    # other tools while making the compute remediation contract identical.
+    for key in _ROOT_LEVEL_DETAIL_KEYS:
+        if context and key in context:
+            payload[key] = context[key]
     return RuntimeError(json.dumps(payload, sort_keys=True))
 
 
@@ -427,9 +591,34 @@ def _response_error(
                 k: v for k, v in detail.items()
                 if k not in {"error", "code", "message", "retryable"}
             }
+            # Derive the tier summary the hosted surface derives, from the
+            # same input, so the two do not diverge on a field an agent uses
+            # to decide whether it sent a name instead of an address.
+            unresolved = detail.get("unresolved")
+            already = "unresolved_accuracy_types" in context
+            if isinstance(unresolved, list) and unresolved and not already:
+                context["unresolved_accuracy_types"] = sorted(
+                    {
+                        entry.get("accuracy_type")
+                        for entry in unresolved
+                        if isinstance(entry, dict) and entry.get("accuracy_type")
+                    }
+                )
         elif detail:
             message = str(detail)
             context = {"detail": detail}
+    # MCP has no HTTP headers. Preserve the server's retry delay so agents
+    # can back off on account/capacity refusals on either transport. Explicit
+    # response detail wins; ignore malformed/unbounded header values.
+    retry_after = resp.headers.get("Retry-After", "")
+    if (
+        "retry_after_seconds" not in context
+        and retry_after.isascii() and retry_after.isdigit()
+        and len(retry_after) <= 7
+    ):
+        seconds = int(retry_after)
+        if seconds <= 604800:
+            context["retry_after_seconds"] = seconds
     return _mcp_error(
         code=code,
         message=message,
@@ -476,23 +665,16 @@ def _validate_coordinate(lat: float, lng: float, *, tool_name: str) -> None:
             message="lat and lng must be finite decimal-degree numbers.",
             tool_name=tool_name,
         )
-    if not (US_ENVELOPE["lat_min"] <= lat <= US_ENVELOPE["lat_max"]):
+    # Keep this dependency-free proxy in parity with
+    # mireye_earth._core.orchestrator.validate_us_coordinate. The catalog's
+    # coarse rectangular envelope intentionally remains unchanged because
+    # expanding it would falsely claim coverage across the North Pacific.
+    legacy_envelope = -180 <= lng <= -65 and 18 <= lat <= 72
+    western_aleutians = 172 <= lng < 180 and 51 <= lat <= 54
+    if not (legacy_envelope or western_aleutians):
         raise _tool_error(
             code="coord_out_of_bounds",
-            message=(
-                f"lat={lat} outside US envelope "
-                f"[{US_ENVELOPE['lat_min']}, {US_ENVELOPE['lat_max']}]"
-            ),
-            tool_name=tool_name,
-            http_status=400,
-        )
-    if not (US_ENVELOPE["lng_min"] <= lng <= US_ENVELOPE["lng_max"]):
-        raise _tool_error(
-            code="coord_out_of_bounds",
-            message=(
-                f"lng={lng} outside US envelope "
-                f"[{US_ENVELOPE['lng_min']}, {US_ENVELOPE['lng_max']}]"
-            ),
+            message=f"lat={lat}, lng={lng} outside supported US coverage",
             tool_name=tool_name,
             http_status=400,
         )
@@ -547,13 +729,17 @@ async def _post(path: str, payload: dict[str, Any], *, tool_name: str) -> dict[s
         "X-Mireye-MCP-Call-ID": f"mcp_call_{uuid4().hex}",
         "X-Mireye-MCP-Package-Version": _package_version(),
     })
+    timeout_seconds = (
+        max(TIMEOUT_SECONDS, SEARCH_TIMEOUT_SECONDS) if path == "/v1/search" else TIMEOUT_SECONDS
+    )
+    timeout = httpx.Timeout(timeout_seconds) if path == "/v1/search" else TIMEOUT
     try:
-        async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+        async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.post(url, json=payload, headers=headers)
     except httpx.TimeoutException as exc:
         raise _tool_error(
             code="upstream_timeout",
-            message=f"Mireye API timed out after {TIMEOUT_SECONDS:g} seconds.",
+            message=f"Mireye API timed out after {timeout_seconds:g} seconds.",
             tool_name=tool_name,
             retryable=True,
         ) from exc
@@ -1040,7 +1226,7 @@ async def mireye_ask(
     lng: MireyeLng | None = None,
     address: MireyeAddress | None = None,
 ) -> dict[str, Any]:
-    """Answer a natural-language question about a US location, with citations to authoritative federal data sources. Give EITHER lat+lng OR address, never both. Returns the answer plus per-citation provenance (source, source URL, fetched_at, confidence). Use this when the caller has a specific question about a place (e.g. 'is this in a flood zone?', 'what's the wildfire risk here?'). When you pass an address, the response carries a `geocode` block: if `parcel_grade` is false the location was estimated from the street and can be ~2.9 km out in rural areas, and the answer says so."""  # noqa: E501
+    """Answer a natural-language question about a US location, with citations to authoritative public and open data sources. Give EITHER lat+lng OR address, never both. Returns the answer plus per-citation provenance (source, source URL, fetched_at, confidence). Use this when the caller has a specific question about a place (e.g. 'is this in a flood zone?', 'what's the wildfire risk here?'). When you pass an address, the response carries a `geocode` block: if `parcel_grade` is false the location was estimated from the street and can be ~2.9 km out in rural areas, and the answer says so."""  # noqa: E501
     body = _locator_body(lat, lng, address, tool_name="mireye_ask")
     return await _post("/v1/ask", {**body, "question": question}, tool_name="mireye_ask")
 
@@ -1057,7 +1243,7 @@ async def mireye_fetch(
     fields: MireyeFields | None = None,
     preset: MireyePreset | None = None,
 ) -> dict[str, Any]:
-    """Fetch specific data fields at a US location with full provenance per field. Give EITHER lat+lng OR address, never both. Use this when the caller knows exactly which fields they need (e.g. 'elevation and slope at this point') or wants to power a custom workflow. Each field includes its value, source, source URL, fetched_at timestamp, and confidence. When you pass an address, the response carries a `geocode` block: check `parcel_grade` before trusting parcel-specific fields — a false value means the coordinate was estimated from the street and can be ~2.9 km out in rural areas."""  # noqa: E501
+    """Fetch specific data fields at a US location with full provenance per field. Give EITHER lat+lng OR address, never both. Use this when the caller knows exactly which fields they need (e.g. 'elevation and slope at this point') or wants to power a custom workflow. Each field includes its value, source, source URL, fetched_at timestamp, and confidence. When you pass an address, the response carries a `geocode` block: check `parcel_grade` before trusting parcel-specific fields — a false value means the coordinate was estimated from the street and can be ~2.9 km out in rural areas. Fields carry a tri-state `status`: `ok` (real value), `absent` (valid no-data — an answer), `failed` (upstream error, auto-refunded). NEVER cache or restate a `failed` field as an answer — re-fetch it (with backoff when `retryable` is true)."""  # noqa: E501
     payload = _locator_body(lat, lng, address, tool_name="mireye_fetch")
     _validate_fetch_args(fields, preset, tool_name="mireye_fetch")
     if fields:
@@ -1106,7 +1292,7 @@ async def mireye_lookup(
     input: MireyeResolveInput,
     include_parcel: bool = True,
 ) -> dict[str, Any]:
-    """Turn a messy human locator (address, "lat,lng", or APN) into canonical join keys: a coordinate, resolved address, and -- when the geocode is parcel-quality -- a parcel (id, boundary, owner). Unlike mireye_geocode, this detects genuine ambiguity across multiple candidate matches instead of trusting a single top result, so an underspecified input like '1100 King St W, Toronto' returns disposition='clarify' with candidates instead of silently landing on the wrong Toronto. ALWAYS check `disposition` first: 'resolved' carries a coordinate and confidence (plus a parcel when safe); 'clarify' means the input is genuinely ambiguous -- present the candidates to the user, never auto-pick one; 'no_match' is an honest failure with a `reason`. A parcel-lookup failure never demotes a good geocode -- 'resolved' can still come back with `parcel_unavailable: true` and a `parcel_unavailable_reason` (e.g. the vendor's own quota being exhausted) rather than an error. Swapped coordinates (e.g. lng where lat belongs) are rejected as a bounds error, never silently treated as a nearest-match. APN-only lookup is not supported yet -- supply an address or coordinate. A 'resolved' response also carries free area context gathered concurrently with the parcel lookup: jurisdiction codes (state, block/block-group, congressional district, CBSA/metro area) alongside county/tract, elevation and FEMA flood-zone fields, a county_market bundle (population, growth, employment, home-price change, median income), Opportunity Zone status, and an IANA timezone -- every one of these degrades independently to null on its own failure and never blocks the primary coordinate/parcel answer."""  # noqa: E501
+    """Turn a messy human locator (address, "lat,lng", or APN) into canonical join keys: a coordinate, resolved address, and -- when the geocode is parcel-quality -- a parcel (id, boundary, owner). Unlike mireye_geocode, this detects genuine ambiguity across multiple candidate matches instead of trusting a single top result, so an underspecified input like '1100 King St W, Toronto' returns disposition='clarify' with candidates instead of silently landing on the wrong Toronto. ALWAYS check `disposition` first: 'resolved' carries a coordinate and confidence (plus a parcel when safe); 'clarify' means the input is genuinely ambiguous -- present the candidates to the user, never auto-pick one; 'no_match' is an honest failure with a `reason`. A parcel-lookup failure never demotes a good geocode -- 'resolved' can still come back with `parcel_unavailable: true` and a `parcel_unavailable_reason` (e.g. the vendor's own quota being exhausted) rather than an error. Swapped coordinates (e.g. lng where lat belongs) are rejected as a bounds error, never silently treated as a nearest-match. APN-only lookup is not supported yet -- supply an address or coordinate. A 'resolved' response also carries free area context gathered concurrently with the parcel lookup: jurisdiction codes (state, block/block-group, congressional district, CBSA/metro area) alongside county/tract, elevation and FEMA flood-zone fields, a county_market bundle (population, growth, employment, home-price change, median income), Opportunity Zone status, and an IANA timezone -- every one of these degrades independently to null on its own failure and never blocks the primary coordinate/parcel answer. CHECK `parcel_grade` BEFORE RE-USING THE COORDINATE: on a 'resolved' response it is false when the geocoder could only interpolate the point along the street instead of matching a rooftop, and `precision_note` says so in prose. The parcel in that response is still the right one -- a street-tier lookup matches by situs ADDRESS, never by the estimated pin -- but the top-level lat/lng can sit on the NEIGHBOURING property, so passing it to mireye_fetch or mireye_ask returns the neighbour's data. Use `parcel.interior_point_lat`/`parcel.interior_point_lng` for downstream point queries instead: a coordinate guaranteed to fall inside the matched parcel. `parcel_grade` is absent when no geocode ran (a coordinate you supplied) or when there is no single coordinate yet ('clarify'/'no_match')."""  # noqa: E501
     # Thin proxy, like every tool here — no resolve logic crosses into this
     # package. Keep the signature and docstring in step with api/main.py's
     # mireye_lookup; tests/test_mcp.py asserts surface parity.
@@ -1115,6 +1301,33 @@ async def mireye_lookup(
         {"input": input, "include_parcel": include_parcel},
         tool_name="mireye_lookup",
     )
+
+
+@mcp.tool(title="Enrich a Parcel", annotations=READ_ONLY_TOOL_ANNOTATIONS, structured_output=True)
+async def mireye_enrich(req: EnrichRequest) -> dict[str, Any]:
+    """Enrich one US parcel with selected parcel attributes, point data and polygon calculations, with provenance and ok/absent/failed status per field. Give EITHER address OR lat+lng inside req, never both; include city+state or ZIP with a street address. Use fields for individual Enrich field IDs and preset for one named Enrich bundle. Both selectors combine by union without duplicates; omitting or nulling both requests all Enrich fields, so prefer a small explicit selection. See https://docs.mireye.ai/api-reference/enrich-fields for Enrich fields and presets; the Fetch catalog resources describe a different field set. ALWAYS inspect parcel_match.status first: only matched returns fields; no_match, ambiguous and unavailable return match evidence with empty fields. Never choose an ambiguous candidate automatically. Point data uses the matched parcel's analysis_point, while polygon calculations describe its boundary. Inspect each field's status and partial_failures; an absent value means no data and a failed value is not evidence of absence. Returns the same response as POST /v1/enrich. Requires authentication with no plan restriction, currently costs zero customer credits, and shares account rate limits and Fetch execution capacity."""  # noqa: E501
+    return await _post("/v1/enrich", req.model_dump(mode="json"), tool_name="mireye_enrich")
+
+
+@mcp.tool(title="Search Parcels", annotations=READ_ONLY_TOOL_ANNOTATIONS, structured_output=True)
+async def mireye_search(req: SearchRequest) -> dict[str, Any]:
+    """Find the first parcels satisfying ALL conditions in one filters list, never ranked top matches. Source routing is automatic: stored parcel predicates run first, then exact geometry predicates and Fetch calculations qualify candidates in batches. Return basic parcel details with APN, an interior point, filter values, and optional additional fields. Additional fields never affect matching; missing information is null with field_status absent or failed. The shortlist excludes internal IDs and returns boundary geometry only when selected in fields. Set optional enrich to true to attach an enrichment object to every returned match with all current Enrich fields, provenance and partial_failures, including catalog geometry and identifier fields. It defaults to false. Enrichment reuses the selected parcel and interior analysis point; it does not change matching or shortlist fields. Use geometry with intersects or within and a WGS84 GeoJSON Polygon/MultiPolygon in the same filters list. Search returns 10 matches per page by default; request up to 100 per page. All Search requests share a configurable 180-second default budget for searching and enrichment. If another page is available, next_cursor is returned; send it with unchanged filters, fields and enrich, and choose a limit from 1 to 100 for the next page. Existing sources and their configured live fallbacks may run. Parcel calculations use the original boundary. Enrich-only calculations cannot be filters or selected through fields. No geocoding or new parcel lookup occurs. Check status and completion_reason: partial results cannot establish no-match. Failed enrichment retains a match and makes the response partial. Absent values fail hard filters. Point samples describe that point, not the entire parcel. Invalid requests include issues, correction hints and docs_url."""  # noqa: E501
+    return await _post("/v1/search", req.model_dump(mode="json"), tool_name="mireye_search")
+
+
+@mcp.tool(
+    title="Compute Drive-Time Distances",
+    annotations=READ_ONLY_TOOL_ANNOTATIONS,
+    structured_output=True,
+)
+async def mireye_proximity(req: MireyeComputeRequest) -> dict[str, Any]:
+    """Compute driving-time distance, nearest-candidate ranking, proximity screening, or labor-shed statistics across MULTIPLE US + Canada coordinates in one call -- what mireye_fetch/mireye_ask do for a single point, this does for a whole matrix of them. One discriminated request via `op`: `distance` (N origins x M destinations), `nearest` (top-N candidates from a curated set, ranked by driving duration), `screen` (filter origins by driving-duration proximity to up to 10 anchors), or `labor_shed` (civilian labor force + population within a driving-minutes shed of one origin). Every origin/destination/anchor is a coordinate ('lat,lng') or a street address -- NEVER a named place: an airport's name, a substation's name, or any other landmark is not an address and will fail to resolve. To reach named infrastructure, use `nearest`'s curated `set` (`@airports`, `@substations`, `@power_plants`, `@rail`, `@ports`, `@urban_areas`) or supply that place's own coordinate directly. Durations reflect typical traffic, not real-time conditions, and coverage is US + Canada driving only. Every response echoes `paid_driving_calcs` (what pricing charged for, computed from the request shape, never from how many locators happened to resolve) and `notes` (coverage + traffic honesty labels). PRECISION IS YOUR RESPONSIBILITY: send the most complete locator you have. A bare street ('1412 market street') or a place/landmark name ('SFO airport') does NOT fail loudly at the geocoder -- it matches a real but WRONG place (those two match a town called Market in West Virginia and a town called Airport in North Carolina), and is then refused. A per-item resolution failure never fails the whole request (bulk destinations/candidates) except for a required role (an op's origin(s), or `screen`'s anchors), which raises a structured, non-retryable tool error carrying `unresolved_accuracy_types` (a `place` tier means you sent a name, not an address) and `caller_guidance`. YOU CAN OFTEN REPAIR THIS AND A PROGRAM CANNOT -- you have context and world knowledge, so you can tell that a request mentioning SFO probably means Market Street in San Francisco. That ability comes with an obligation: whenever you retry using anything you INFERRED rather than what the caller supplied -- a city, state, ZIP, or a coordinate/curated `set` substituted for a place name -- you MUST state that assumption explicitly when you report the result, naming what was missing and what you assumed ('the address had no city; I assumed San Francisco'), and never present an inferred location as though the caller specified it; if you cannot infer it confidently, ask instead of guessing. Apply the same rule to a SUCCESSFUL response: check `notes` and the `resolved_*` arrays, because per-item failures are dropped silently from the results, and report anything that was dropped, any `unreachable_or_snapped` leg (a null duration means no road route was found -- do not present its distance as drivable), and any `tracts_unreachable` on a labor shed. An overloaded worker or an exhausted shared driving-matrix budget raises a structured, retryable error instead. Every op takes an optional `max_credits`: a request priced above it is refused with a 422 that states the exact price, BEFORE the driving matrix is charged. Use it whenever you are unsure of the cost -- a request over the service ceiling is refused with that same 422 telling you to pass it, and a labor_shed over a dense metro clears the ceiling routinely (a 15-minute Los Angeles shed prices at 18,792 credits). For labor_shed specifically, prefer `estimate: true` first: it returns the EXACT price without running or paying for the shed."""  # noqa: E501
+    # Thin proxy, like every tool here -- no compute-op logic crosses into
+    # this package. model_dump replays the exact validated body POST
+    # /v1/proximity expects; exclude_none drops the optional fields a caller
+    # left unset (filters, min_minutes) rather than sending an explicit null.
+    payload = req.model_dump(exclude_none=True)
+    return await _post("/v1/proximity", payload, tool_name="mireye_proximity")
 
 
 @mcp.tool(
@@ -1308,7 +1521,13 @@ def _mireye_request_field_prompt(description: str, location: str, idempotency_ke
         "reject the closest existing field; 'accepted_new' means it's queued — "
         "give the user the `request_id` and tell them to check back with "
         "`mireye_field_request_status`; 'rejected' carries a typed reason and "
-        "routing hint. If the response is a stateless location `clarify`, "
+        "routing hint. "
+        "If an entry carries `unit_conversion`, the field answers the ask in a "
+        "DIFFERENT unit than the user asked for: send `resume` unchanged, then "
+        "multiply the returned value by `unit_conversion.multiply_by` and report "
+        "it in `unit_conversion.to`. Never send the conversion to /v1/fetch — it "
+        "has no units parameter. "
+        "If the response is a stateless location `clarify`, "
         "present the candidates and never auto-pick one."
     )
 
@@ -1323,6 +1542,11 @@ def _mireye_field_request_status_prompt(request_id: str) -> str:
     return (
         f"Call the `mireye_field_request_status` tool with request_id={request_id!r}. "
         "If `status` is 'live', use the `resume` call to fetch the answer now. "
+        "If the `resume` call carries a `unit_conversion`, POST it unchanged and "
+        "then multiply the value by `unit_conversion.multiply_by`, reporting the "
+        "result in `unit_conversion.to` — the field's own unit is not what the "
+        "user asked for. "
+
         "If it's 'awaiting_confirm', tell the user what's waiting on them. If "
         "it's still building (`queued`/`claimed`/`building`/`in_review`/"
         "`approved`/`publishing`), report `queue_position` and "
