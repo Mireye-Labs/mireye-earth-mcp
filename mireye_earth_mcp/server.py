@@ -469,6 +469,20 @@ def _auth_headers(token: str | None, *, base_url: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
+def _onboarding_attempt_id(token: str | None) -> str | None:
+    """Attribute only calls made by the credential issued for this attempt."""
+    stored = _load_stored_credentials() or {}
+    attempt = stored.get("onboarding_attempt_id")
+    if (
+        token and token == stored.get("token")
+        and _stored_base_url(stored) == MIREYE_BASE_URL
+        and isinstance(attempt, str)
+        and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", attempt)
+    ):
+        return attempt
+    return None
+
+
 def _json_dumps(data: Any) -> str:
     return json.dumps(data, indent=2, sort_keys=True)
 
@@ -766,7 +780,8 @@ async def _post(path: str, payload: dict[str, Any], *, tool_name: str) -> dict[s
     can assert the same payload.
     """
     url = f"{MIREYE_BASE_URL}{path}"
-    headers = _auth_headers(_configured_token(), base_url=MIREYE_BASE_URL)
+    token = _configured_token()
+    headers = _auth_headers(token, base_url=MIREYE_BASE_URL)
     if not headers:
         raise _tool_error(
             code="mcp_auth_required",
@@ -783,6 +798,9 @@ async def _post(path: str, payload: dict[str, Any], *, tool_name: str) -> dict[s
         "X-Mireye-MCP-Call-ID": f"mcp_call_{uuid4().hex}",
         "X-Mireye-MCP-Package-Version": _package_version(),
     })
+    attempt = _onboarding_attempt_id(token) if path == "/v1/fetch" else None
+    if attempt:
+        headers["X-Mireye-Onboarding-Attempt"] = attempt
     timeout_seconds = (
         max(TIMEOUT_SECONDS, SEARCH_TIMEOUT_SECONDS) if path == "/v1/search" else TIMEOUT_SECONDS
     )
@@ -1162,6 +1180,10 @@ def _cmd_logout(args: argparse.Namespace) -> int:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="mireye-mcp")
     sub = parser.add_subparsers(dest="command")
+
+    from .onboarding import register_commands
+
+    register_commands(sub)
 
     login = sub.add_parser("login", help="Authenticate this MCP client.")
     login.add_argument("--timeout", type=int, default=900, help="Seconds to wait for approval.")

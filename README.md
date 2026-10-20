@@ -13,20 +13,90 @@ lookup, proximity, and field-request endpoints to MCP clients
 that need a local stdio adapter (Claude Desktop, Cursor, custom agents
 built on the `mcp` Python SDK) as native tools — no HTTP wiring required.
 
-This is a standalone PyPI package (`mireye-mcp`) with only two
-runtime dependencies — `httpx` and `mcp`. It does not pull in the
-geospatial backend, so there's no GDAL / rasterio / DuckDB build step.
+This is a standalone PyPI package (`mireye-mcp`) using `httpx` and `mcp`
+(plus `tomli` on Python 3.10). It does not pull in the geospatial backend,
+so there's no GDAL / rasterio / DuckDB build step.
 
 The server is a local stdio adapter with no geospatial business logic:
 tool handlers POST to the deployed Mireye HTTP API, while read-only MCP
 resources fetch and cache the public field catalog.
 
-Mireye also exposes a hosted remote MCP endpoint at
-`https://api.mireye.com/mcp` for clients that support Streamable
-HTTP and native OAuth. Use that hosted endpoint for Claude Code so `/mcp`
-opens the browser sign-in flow. This package remains the local stdio path;
-it uses `uvx --from 'mireye-mcp>=0.6.1' mireye-mcp login` or
-`MIREYE_BEARER_TOKEN` for credentials.
+## Guided agent setup (0.7.1)
+
+Sign in at [Mireye agent setup](https://www.mireye.com/onboarding), copy the
+setup prompt, and paste it into your coding agent. The prompt includes your
+API key and setup identifiers automatically. You do not need to create or enter
+a key manually. It runs:
+
+```bash
+uvx --from mireye-mcp==0.7.1 mireye-mcp connect --all --api-key '<api-key>' --attempt-id '<attempt-id>' --token-id '<token-id>'
+uvx --from mireye-mcp==0.7.1 mireye-mcp doctor --proof
+```
+
+`connect` detects Claude Code, Codex, and Cursor, validates and saves the API key,
+registers the stdio server, and installs the bundled `use-mireye` skill.
+`doctor --proof` checks the actual installed entries, starts their MCP command,
+initializes MCP, lists tools, and calls `mireye_fetch` for elevation at
+40.7128, -74.0060. It reports completion only when the real result has an `ok`
+status, a numeric value, and source provenance. This makes one small Fetch
+request; the website completes when the server observes the first successful
+call. Installation and verification are separate diagnostic milestones. Restart
+your agent to load its new connection and skill.
+
+The skill helps the agent choose Mireye for relevant US location and property
+tasks in future conversations, pick the right tool, and retain citations,
+location uncertainty, and failed fields. Setup writes these user-scoped files:
+
+| Client / purpose | MCP configuration | Skill / credential file |
+| --- | --- | --- |
+| Claude Code | `~/.claude.json` | `~/.claude/skills/use-mireye/SKILL.md` |
+| Codex | `~/.codex/config.toml` | `~/.agents/skills/use-mireye/SKILL.md` |
+| Cursor | `~/.cursor/mcp.json` | `~/.agents/skills/use-mireye/SKILL.md` (shared with Codex) |
+| Local login | — | `~/.config/mireye-mcp/credentials.json` (mode `0600`) |
+| Setup ownership | — | `~/.config/mireye-mcp/onboarding.json` |
+| Setup writer lock | — | `~/.config/mireye-mcp/onboarding.lock` (retained for coordination) |
+
+MCP entries contain the credential file path, not the token. Setup does not
+modify `AGENTS.md`, `CLAUDE.md`, project files, or shell profiles. It preserves
+unrelated settings, backs up existing changed MCP files beside the original,
+and refuses conflicting entries or customized skills. Repeating `connect`
+reuses the stored login and unchanged files. The website also reuses a valid
+setup key on repeated copies. Normal API-key expiry and revocation apply;
+there is no short-lived setup code or cleanup policy.
+
+Installation and removal share a local writer lock and recheck observed file
+contents before mutation, preserving intervening edits. Retry after another
+setup finishes. Codex inline `mcp_servers = { ... }` tables require manual
+configuration or conversion to standard `[mcp_servers.name]` tables; preflight
+reports this before authentication. Dry runs do not create the lock file.
+
+Useful options, placed after `connect` or `doctor`:
+
+```bash
+# Preview all proposed paths without authenticating or writing anything.
+uvx --from mireye-mcp==0.7.1 mireye-mcp connect --all --dry-run
+# Target one installed client; --client can be repeated.
+uvx --from mireye-mcp==0.7.1 mireye-mcp connect --client codex
+# Read a credential-redacted report; --proof is optional.
+uvx --from mireye-mcp==0.7.1 mireye-mcp doctor --proof --json
+# Remove unchanged owned entries and skills; keep the login for reuse.
+uvx --from mireye-mcp==0.7.1 mireye-mcp connect --all --remove
+```
+
+`--all` skips absent supported clients and reports them; an explicitly selected
+missing or unsupported client is an error. Custom `CODEX_HOME` or
+`CLAUDE_CONFIG_DIR` values are currently rejected by automatic setup; configure
+those clients manually. `--config-home PATH` (or `MIREYE_MCP_SETUP_HOME`) isolates
+all setup files under a test home without changing `HOME` or `CODEX_HOME`.
+For development, `connect --package-source /absolute/path/to/mcp_server` installs
+the local package through the current Python environment; it must already have
+the MCP dependencies. Both commands accept `--base-url`; a directly supplied
+API key is accepted only for `https://api.mireye.com` or loopback development servers.
+
+The guided path requires the 0.7.1 package and the onboarding API deployment.
+Existing manual local device login and hosted MCP OAuth remain available below.
+Mireye's hosted remote MCP endpoint is `https://api.mireye.com/mcp` for clients
+that support Streamable HTTP and native OAuth.
 
 ---
 
@@ -105,7 +175,7 @@ the next invocation is instant. No venv to manage, no `pip install`,
 no native builds.
 
 The required-state Search contract and revised Enrich field metadata require
-`mireye-mcp` **0.6.1 or later**. After that release is published, refresh an older
+`mireye-mcp` **0.6.1 or later**; guided setup requires **0.7.1**. Refresh an older
 cached install with `uvx mireye-mcp@latest`, then restart your MCP client so
 it reloads the tool schemas. The version requirement in the configurations below
 prevents an older cached adapter from satisfying the request.
@@ -192,7 +262,7 @@ To point at a self-hosted deployment instead of the default Fly URL:
 
 ## Wire it into Claude Code
 
-Use the hosted HTTP MCP endpoint instead of this local stdio package:
+For a manual hosted connection using Claude Code's native browser OAuth flow:
 
 ```bash
 claude mcp remove mireye-earth -s user   # only needed if an old stdio entry exists
@@ -266,14 +336,15 @@ async with stdio_client(params) as (read, write):
 |--------------------|----------------------------------|----------------------------------|
 | `MIREYE_BASE_URL`  | `https://api.mireye.com`   | HTTP base URL the tools POST to. Stored login credentials only attach when they were created against this same URL. |
 | `MIREYE_TIMEOUT_S` | `120`                            | Per-request timeout in seconds (must exceed the ~110 s `/v1/ask` deadline). Search uses at least 210 seconds; a larger configured timeout is honored. |
-| `MIREYE_BEARER_TOKEN` | unset | Optional Mireye bearer token. Overrides stored credentials for tool calls; `status` reports on the stored login first. |
-| `MIREYE_MCP_CREDENTIALS_FILE` | `~/.config/mireye-mcp/credentials.json` | Stored token path used by `login` / `status` / `logout`. |
+| `MIREYE_BEARER_TOKEN` | unset | Optional bearer token for manual launches; overrides stored credentials. Guided connections set it empty so the server and `doctor` use the saved setup key. `status` reports on the stored login first. |
+| `MIREYE_MCP_CREDENTIALS_FILE` | `~/.config/mireye-mcp/credentials.json` | Stored token path used by `login` / `status` / `logout` and guided setup. |
+| `MIREYE_MCP_SETUP_HOME` | unset | Isolated home layout for `connect` / `doctor`; `--config-home` takes precedence. |
 
 ## Authentication
 
 The local stdio adapter does not perform native MCP OAuth discovery.
-The HTTP API requires bearer auth for tool calls, so run
-the device login helper once:
+The HTTP API requires bearer auth for tool calls. Guided `connect` already
+stores that login. For manual setup, run the device login helper once:
 
 ```bash
 uvx --from 'mireye-mcp>=0.6.1' mireye-mcp login
@@ -406,23 +477,23 @@ Official MCP Registry, then a snapshot of this directory to the public mirror.
 It runs on `v*` tags in the private monorepo, with a guard requiring the tag to match
 the root `pyproject.toml` version.
 
-The coordinated **0.6.1** release aligns the root package and lockfile with
+The coordinated **0.7.1** release aligns the root package and lockfile with
 `mcp_server/pyproject.toml`, `mcp_server/uv.lock`, and both version entries in
-`mcp_server/server.json`. Version 0.6.0 predates the required-state Search contract
-and revised Enrich response metadata, so it cannot be reused for these changes.
-After the release changes are merged and authenticated Search and Enrich have
-been verified against the deployed backend, tag that approved monorepo commit
-`v0.6.1` and push the tag to start the existing release process.
-The public mirror receives its package tag from the workflow; tagging the mirror
-alone does not publish the package.
+`mcp_server/server.json`. It adds `connect`, `doctor`, and the bundled
+`use-mireye` skill with direct API-key onboarding. Deploy the onboarding API,
+publish and verify the package, then deploy the website that generates its
+copyable setup command. After the release changes are approved and the real
+onboarding flow is verified locally, tag that approved monorepo commit `v0.7.1` and push
+the tag to start the existing release process. The public mirror receives its
+package tag from the workflow; tagging the mirror alone does not publish.
 
-Follow the run through PyPI, registry publication, and mirror sync;
-re-run a failed job rather than moving a release tag. Verify the published wheel
-lists both `mireye_search` and `mireye_enrich`, rejects a Search request without a
-positive `state`/`state2` filter, and passes through the revised Enrich fields
-(including omitted lifecycle and null failure keys, retained nullable values,
-provenance, and interpretation hints). Verify that the public mirror's `v0.6.1`
-contains the same package source. A local build or merged PR alone does not publish.
+Follow the run through PyPI, registry publication, and mirror sync; re-run a
+failed job rather than moving a release tag. Verify that the published wheel
+contains `mireye_earth_mcp/skills/use-mireye/SKILL.md`, that `connect --dry-run`
+works, and that isolated API-key setup followed by `doctor --proof` launches
+the installed MCP and returns cited elevation. Retain the existing Search and
+Enrich schema checks. Verify that the public mirror's `v0.7.1` contains the same
+package source. A local build or merged PR alone does not publish.
 
 From this package directory, check distributions locally without publishing:
 
