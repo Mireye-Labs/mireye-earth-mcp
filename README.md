@@ -397,12 +397,13 @@ Official MCP Registry, then a snapshot of this directory to the public mirror.
 It runs on `v*` tags in the private monorepo, with a guard requiring the tag to match
 the root `pyproject.toml` version.
 
-Search and Enrich are prepared for MCP **0.6.0** in `mcp_server/pyproject.toml`,
-`mcp_server/uv.lock`, and both version entries in `mcp_server/server.json`. The
-coordinated release still requires aligning the root package version and lockfile
-with its release tag, as for previous endpoint releases. After the changes are
-merged and the backend exposes Search and Enrich, an authorized maintainer can
-prepare and push that tag through the existing release process.
+The coordinated **0.6.0** release aligns the root package and lockfile with
+`mcp_server/pyproject.toml`, `mcp_server/uv.lock`, and both version entries in
+`mcp_server/server.json`. After the release changes are merged and authenticated
+Search enrichment has been verified against the deployed backend, tag that approved
+monorepo commit `v0.6.0` and push the tag to start the existing release process.
+The public mirror receives its package tag from the workflow; tagging the mirror
+alone does not publish the package.
 
 Follow the run through PyPI, registry publication, and mirror sync;
 re-run a failed job rather than moving a release tag. Verify the published wheel
