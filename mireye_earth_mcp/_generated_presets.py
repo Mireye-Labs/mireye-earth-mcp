@@ -24,3 +24,21 @@ MireyePreset = Literal[
 ]
 
 PRESET_NAMES: tuple[str, ...] = tuple(MireyePreset.__args__)
+
+# Enrich has its own subject presets; Fetch's MireyePreset stays unchanged.
+EnrichPresetName = Literal[
+    "parcel",
+    "zoning",
+    "buildings",
+    "valuation",
+    "legal",
+    "power",
+    "access",
+    "water",
+    "terrain",
+    "environment",
+    "climate",
+    "hazards",
+    "market",
+    "constraints",
+]

@@ -8,7 +8,8 @@
 > on every release. Issues and PRs are welcome here (changes are applied upstream
 > and re-synced; the test suite runs in the monorepo); releases land via PyPI.
 
-Expose Mireye Earth's `/v1/ask` and `/v1/fetch` endpoints to MCP clients
+Expose Mireye Earth's Search, Enrich, Fetch, question-answering, geocoding,
+lookup, proximity, and field-request endpoints to MCP clients
 that need a local stdio adapter (Claude Desktop, Cursor, custom agents
 built on the `mcp` Python SDK) as native tools — no HTTP wiring required.
 
@@ -30,17 +31,20 @@ it uses `mireye-mcp login` or `MIREYE_BEARER_TOKEN` for credentials.
 
 ## What the agent gets
 
-Six tools, all prefixed `mireye_` so they sort together and don't
+Nine tools, all prefixed `mireye_` so they sort together and don't
 collide with generic `ask` / `fetch` tools from other MCP servers:
 
 | Tool             | When the agent should call it                                                                  |
 |------------------|------------------------------------------------------------------------------------------------|
 | `mireye_ask`     | The caller asked a question about a US place ("is this in a flood zone?", "wildfire risk?").   |
+| `mireye_proximity` | The caller wants drive-time distance, nearest-candidate ranking, proximity screening, or labor-shed stats across multiple coordinates. |
 | `mireye_fetch`   | The caller wants specific named fields ("elevation and slope here") or is powering a workflow. |
 | `mireye_geocode` | The caller gave an address and just wants the coordinate + its quality, nothing else. |
 | `mireye_lookup` | The input might be ambiguous, isn't a clean address (a coordinate or an APN), or a parcel is wanted. |
 | `mireye_request_field` | The catalog doesn't have the field the caller needs — describe it in plain language plus example locations and either get a live match now or a `request_id` to build it. |
 | `mireye_field_request_status` | Poll a `request_id` from `mireye_request_field` for status, queue position, ETA, and (once `live`) the `resume` call. |
+| `mireye_search` | Find the first parcels satisfying every supplied parcel and Fetch filter, with explicit coverage limits. |
+| `mireye_enrich` | Resolve one US parcel and return selected Enrich attributes and calculations with field-level provenance. |
 
 Catalog context is exposed as MCP resources instead of extra tools:
 
@@ -80,9 +84,11 @@ MCP prompts as slash commands under the form `/mcp__<server>__<prompt>`.
 | `mireye_grid_interconnect_report` | Interconnection signals via the `grid_interconnect` preset. |
 | `mireye_natural_hazard_report` | Natural hazard signals via the `natural_hazard` preset. |
 
-There is no third `list_fields` tool. Agents that need the catalog should
+There is no separate `list_fields` tool. Agents that need the Fetch catalog should
 read the MCP resources above; the stdio adapter backs them with
-`GET /v1/meta/fields` and a 1-hour ETag-aware cache.
+`GET /v1/meta/fields` and a 1-hour ETag-aware cache. Search and Enrich selectors
+come from their separate [Search field reference](https://docs.mireye.ai/api-reference/search-fields)
+and [Enrich field reference](https://docs.mireye.ai/api-reference/enrich-fields).
 
 ---
 
@@ -117,8 +123,7 @@ mireye-mcp  # entry point
 This server is published to the
 [Official MCP Registry](https://registry.modelcontextprotocol.io) as
 **`com.mireye/earth`** — the entry is live (the publish job ships from
-`release.yml`), and `mireye-mcp` 0.2.0 is on PyPI. The registry entry
-carries both distributions:
+`release.yml`). The registry entry carries both distributions:
 
 - the **PyPI package** `mireye-mcp` (local stdio, run via `uvx`), and
 - the **hosted remote** `https://api.mireye.com/mcp` (Streamable HTTP +
@@ -154,9 +159,9 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json`
 }
 ```
 
-Restart Claude Desktop. The six tools (`mireye_ask`, `mireye_fetch`,
-`mireye_geocode`, `mireye_lookup`, `mireye_request_field`,
-`mireye_field_request_status`)
+Restart Claude Desktop. The nine tools (`mireye_ask`, `mireye_proximity`, `mireye_search`,
+`mireye_enrich`, `mireye_fetch`, `mireye_geocode`, `mireye_lookup`,
+`mireye_request_field`, `mireye_field_request_status`)
 appear under the 🔌 menu, with catalog resources and prompts available to
 clients that surface those MCP primitives.
 
@@ -213,8 +218,8 @@ Cursor's MCP config lives at `~/.cursor/mcp.json` (global) or
 }
 ```
 
-Open **Cursor → Settings → MCP** and confirm `mireye-earth` shows the two
-green tools. Catalog resources and prompts appear when the client supports
+Open **Cursor → Settings → MCP** and confirm `mireye-earth` shows nine
+tools with green status indicators. Catalog resources and prompts appear when the client supports
 those MCP primitives.
 
 ---
@@ -234,7 +239,7 @@ async with stdio_client(params) as (read, write):
     async with ClientSession(read, write) as session:
         await session.initialize()
         tools = await session.list_tools()
-        # tools.tools is [mireye_ask, mireye_fetch]
+        # Inspect tool.name for the nine registered tools, including Search and Enrich.
         resources = await session.list_resources()
         prompts = await session.list_prompts()
 
@@ -251,14 +256,14 @@ async with stdio_client(params) as (read, write):
 | Env var            | Default                          | Purpose                          |
 |--------------------|----------------------------------|----------------------------------|
 | `MIREYE_BASE_URL`  | `https://api.mireye.com`   | HTTP base URL the tools POST to. Stored login credentials only attach when they were created against this same URL. |
-| `MIREYE_TIMEOUT_S` | `120`                            | Per-request timeout in seconds (must exceed the ~110 s `/v1/ask` deadline). |
+| `MIREYE_TIMEOUT_S` | `120`                            | Per-request timeout in seconds (must exceed the ~110 s `/v1/ask` deadline). Search uses at least 210 seconds; a larger configured timeout is honored. |
 | `MIREYE_BEARER_TOKEN` | unset | Optional Mireye bearer token. Overrides stored credentials for tool calls; `status` reports on the stored login first. |
 | `MIREYE_MCP_CREDENTIALS_FILE` | `~/.config/mireye-mcp/credentials.json` | Stored token path used by `login` / `status` / `logout`. |
 
 ## Authentication
 
 The local stdio adapter does not perform native MCP OAuth discovery.
-The HTTP API requires bearer auth for `/v1/ask` and `/v1/fetch`, so run
+The HTTP API requires bearer auth for tool calls, so run
 the device login helper once:
 
 ```bash
@@ -342,14 +347,25 @@ cold start fits; only raise it further (never below 120) if you still time out.
 envelope is `lat ∈ [18, 72]`, `lng ∈ [-180, -65]` — covering the lower 48,
 Alaska, Hawaii, and US territories.
 
-**HTTP 400 `fields_unknown`.** The field name is not in the catalog. Hit
-`https://api.mireye.com/v1/meta/fields` to see the canonical list.
-Common surprises: `elevation_m` is `elevation`, `floodplain` is
+**HTTP 400 `fields_unknown`.** Use the catalog for the tool being called.
+Fetch names are listed at `https://api.mireye.com/v1/meta/fields`; Enrich names
+are in the [Enrich field reference](https://docs.mireye.ai/api-reference/enrich-fields).
+Fetch examples: `elevation_m` is `elevation`, `floodplain` is
 `within_floodplain_polygon`.
 
 **HTTP 4xx/5xx in general.** Tool errors include actionable JSON fields
 such as `code`, `message`, `http_status`, `request_id`, `tool`, and
 `retryable`. Agents should retry only when `retryable` is true.
+Billing errors preserve `retry_after_seconds` when supplied and the raw
+`retry_after` header, which can be seconds or an HTTP-date credit reset time.
+`billing_degraded: true` means the billing service used fallback counters or
+an estimated period. These fields appear at the error root on both transports.
+
+**Proximity request limits.** `distance` and `screen` accept at most 10,000
+origin-by-destination or origin-by-anchor pairs and 25 address-form locators
+across both lists. The adapter applies the same validation as the hosted API
+before sending a request. Split larger batches or supply coordinates for
+addresses you already know.
 
 **Auth errors.** `401` means the MCP server has no token, the token
 expired, or the token was revoked. Run `mireye-mcp login` again,
@@ -376,11 +392,56 @@ allowed by the backend account policy.
 
 ## Releasing
 
-This package is published from this directory on every `v*` tag on the
-main repo. To release locally:
+The private monorepo's `release.yml` owns the complete release: tests, PyPI,
+Official MCP Registry, then a snapshot of this directory to the public mirror.
+It runs on `v*` tags in the private monorepo, with a guard requiring the tag to match
+the root `pyproject.toml` version.
+
+Search and Enrich are prepared for MCP **0.6.0** in `mcp_server/pyproject.toml`,
+`mcp_server/uv.lock`, and both version entries in `mcp_server/server.json`. The
+coordinated release still requires aligning the root package version and lockfile
+with its release tag, as for previous endpoint releases. After the changes are
+merged and the backend exposes Search and Enrich, an authorized maintainer can
+prepare and push that tag through the existing release process.
+
+Follow the run through PyPI, registry publication, and mirror sync;
+re-run a failed job rather than moving a release tag. Verify the published wheel
+lists both `mireye_search` and `mireye_enrich`, and that the public mirror's `v0.6.0`
+contains the same package source. A local build or merged PR alone does not publish.
+
+From this package directory, check distributions locally without publishing:
 
 ```bash
-cd mcp_server
 python -m build
-twine upload dist/*
 ```
+
+### Parcel Search V1
+
+`POST /v1/search` (MCP: `mireye_search`) accepts one `filters` list of hard
+conditions, optional output-only `fields`, `limit`, and a continuation `cursor`. State and acreage are optional
+filters. It returns the first matches with APN and an interior point, plus filter and
+selected field values. Defaults: 10 results per page and a configurable 180-second
+budget. Production uses the same deadline with candidate/evaluation caps of 1,000/500.
+Set `limit` from 1 to 100 on each request, including cursor requests. The response always
+includes `next_cursor`; use a non-null cursor with the same filters, fields and enrich
+value to continue. Cursors expire after one hour. Over-limit requests are rejected.
+Check `status`, `completion_reason` and `field_status`.
+Optional `enrich: true` adds every current Enrich field, provenance and partial failures
+to each match's separate `enrichment` object; it defaults to false. Both modes share the
+180-second budget. Enrichment reuses the original parcel and interior point; failures
+retain the match and make Search partial. Use a client timeout of at least 210 seconds.
+Operational counts are internal. See [the Search contract](https://docs.mireye.ai/api-reference/search).
+
+
+### Parcel Enrich
+
+`POST /v1/enrich` (MCP: `mireye_enrich`) resolves one US parcel from `address` or
+`lat`+`lng` and returns selected attributes and calculations with source metadata.
+Pass the same HTTP object inside `req` for MCP. Select individual Enrich `fields`,
+one Enrich `preset`, or both; omitting both requests all fields. Start with a small
+set. Check `parcel_match.status`, confirm the parcel identity, then inspect each
+field's `status`. Enrich selectors differ from Fetch selectors. Eight hydrography
+and water-cooling fields are excluded from Enrich, even when explicitly requested;
+they remain available through Fetch. Owner assemblage and all wetland fields remain
+available in Enrich. See the
+[Enrich contract](https://docs.mireye.ai/api-reference/enrich).
