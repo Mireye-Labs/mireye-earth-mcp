@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
 
 _STATES = frozenset(
     "AL AK AZ AR CA CO CT DE DC FL GA HI ID IL IN IA KS KY LA ME MD MA MI MN MS MO "
@@ -48,7 +48,12 @@ class SearchFilter(SearchModel):
 
 class SearchRequest(SearchModel):
     filters: list[SearchFilter] = Field(
-        min_length=1, description="All conditions are required; source routing is automatic."
+        min_length=1,
+        description=(
+            "All conditions are required; source routing is automatic. Include state (or state2) "
+            "with eq or a nonempty in list of two-letter US state codes (50 states and DC). "
+            "A ne filter alone does not select a state. County is optional."
+        ),
     )
     limit: int = Field(
         default=10,
@@ -65,3 +70,13 @@ class SearchRequest(SearchModel):
         default_factory=list,
         description="Additional information to return for matches; never used to filter parcels.",
     )
+
+    @field_validator("filters")
+    @classmethod
+    def require_state(cls, filters: list[SearchFilter]) -> list[SearchFilter]:
+        if not any(f.field in {"state", "state2"} and f.op in {"eq", "in"} for f in filters):
+            raise ValueError(
+                "Include a state (or state2) filter with eq or a nonempty in list of "
+                "two-letter US state codes (50 states and DC); ne alone is not sufficient."
+            )
+        return filters

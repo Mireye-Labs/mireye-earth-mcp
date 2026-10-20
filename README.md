@@ -25,7 +25,8 @@ Mireye also exposes a hosted remote MCP endpoint at
 `https://api.mireye.com/mcp` for clients that support Streamable
 HTTP and native OAuth. Use that hosted endpoint for Claude Code so `/mcp`
 opens the browser sign-in flow. This package remains the local stdio path;
-it uses `mireye-mcp login` or `MIREYE_BEARER_TOKEN` for credentials.
+it uses `uvx --from 'mireye-mcp>=0.6.1' mireye-mcp login` or
+`MIREYE_BEARER_TOKEN` for credentials.
 
 ---
 
@@ -95,13 +96,19 @@ and [Enrich field reference](https://docs.mireye.ai/api-reference/enrich-fields)
 ## Install local stdio — one command with `uvx`
 
 ```bash
-uvx mireye-mcp
+uvx --from 'mireye-mcp>=0.6.1' mireye-mcp
 ```
 
 That's it. `uvx` (bundled with [`uv`](https://docs.astral.sh/uv/))
 downloads the package into a managed cache, runs the entry point, and
 the next invocation is instant. No venv to manage, no `pip install`,
 no native builds.
+
+The required-state Search contract and revised Enrich field metadata require
+`mireye-mcp` **0.6.1 or later**. After that release is published, refresh an older
+cached install with `uvx mireye-mcp@latest`, then restart your MCP client so
+it reloads the tool schemas. The version requirement in the configurations below
+prevents an older cached adapter from satisfying the request.
 
 If you don't have `uv`:
 
@@ -112,7 +119,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 Plain pip also works:
 
 ```bash
-pip install mireye-mcp
+pip install --upgrade 'mireye-mcp>=0.6.1'
 mireye-mcp  # entry point
 ```
 
@@ -140,7 +147,7 @@ discover and install it from there — no manual config required.
 First authenticate the local adapter:
 
 ```bash
-mireye-mcp login
+uvx --from 'mireye-mcp>=0.6.1' mireye-mcp login
 ```
 
 For non-interactive hosts, set `MIREYE_BEARER_TOKEN` instead.
@@ -153,7 +160,7 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json`
   "mcpServers": {
     "mireye-earth": {
       "command": "uvx",
-      "args": ["mireye-mcp"]
+      "args": ["--from", "mireye-mcp>=0.6.1", "mireye-mcp"]
     }
   }
 }
@@ -172,7 +179,7 @@ To point at a self-hosted deployment instead of the default Fly URL:
   "mcpServers": {
     "mireye-earth": {
       "command": "uvx",
-      "args": ["mireye-mcp"],
+      "args": ["--from", "mireye-mcp>=0.6.1", "mireye-mcp"],
       "env": {
         "MIREYE_BASE_URL": "https://your-deploy.example.com"
       }
@@ -212,7 +219,7 @@ Cursor's MCP config lives at `~/.cursor/mcp.json` (global) or
   "mcpServers": {
     "mireye-earth": {
       "command": "uvx",
-      "args": ["mireye-mcp"]
+      "args": ["--from", "mireye-mcp>=0.6.1", "mireye-mcp"]
     }
   }
 }
@@ -233,7 +240,9 @@ If you're building an MCP client with the `mcp` Python SDK, point its
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-params = StdioServerParameters(command="uvx", args=["mireye-mcp"])
+params = StdioServerParameters(
+    command="uvx", args=["--from", "mireye-mcp>=0.6.1", "mireye-mcp"]
+)
 
 async with stdio_client(params) as (read, write):
     async with ClientSession(read, write) as session:
@@ -267,7 +276,7 @@ The HTTP API requires bearer auth for tool calls, so run
 the device login helper once:
 
 ```bash
-mireye-mcp login
+uvx --from 'mireye-mcp>=0.6.1' mireye-mcp login
 ```
 
 The command prints a verification URL and code, waits for approval in
@@ -279,7 +288,7 @@ also provide a token directly:
   "mcpServers": {
     "mireye-earth": {
       "command": "uvx",
-      "args": ["mireye-mcp"],
+      "args": ["--from", "mireye-mcp>=0.6.1", "mireye-mcp"],
       "env": {
         "MIREYE_BEARER_TOKEN": "eyJ..."
       }
@@ -291,9 +300,9 @@ also provide a token directly:
 Check or remove local credentials:
 
 ```bash
-mireye-mcp status
-mireye-mcp logout
-mireye-mcp logout --revoke
+uvx --from 'mireye-mcp>=0.6.1' mireye-mcp status
+uvx --from 'mireye-mcp>=0.6.1' mireye-mcp logout
+uvx --from 'mireye-mcp>=0.6.1' mireye-mcp logout --revoke
 ```
 
 ### Credentials are bound to their base URL
@@ -301,7 +310,7 @@ mireye-mcp logout --revoke
 `login` records the `MIREYE_BASE_URL` it ran against, and the stored
 token is only ever sent to that same URL. If `MIREYE_BASE_URL` later
 points somewhere else, tool calls behave as logged out and the error
-names both URLs — re-run `mireye-mcp login` against the new URL,
+names both URLs — re-run `uvx --from 'mireye-mcp>=0.6.1' mireye-mcp login` against the new URL,
 or set `MIREYE_BEARER_TOKEN` explicitly. Credentials files without a
 recorded `base_url` (e.g. hand-written) are treated as bound to the
 default `https://api.mireye.com`.
@@ -368,7 +377,7 @@ before sending a request. Split larger batches or supply coordinates for
 addresses you already know.
 
 **Auth errors.** `401` means the MCP server has no token, the token
-expired, or the token was revoked. Run `mireye-mcp login` again,
+expired, or the token was revoked. Run `uvx --from 'mireye-mcp>=0.6.1' mireye-mcp login` again,
 or set `MIREYE_BEARER_TOKEN`. `403` means the signed-in account is not
 allowed by the backend account policy.
 
@@ -397,17 +406,22 @@ Official MCP Registry, then a snapshot of this directory to the public mirror.
 It runs on `v*` tags in the private monorepo, with a guard requiring the tag to match
 the root `pyproject.toml` version.
 
-The coordinated **0.6.0** release aligns the root package and lockfile with
+The coordinated **0.6.1** release aligns the root package and lockfile with
 `mcp_server/pyproject.toml`, `mcp_server/uv.lock`, and both version entries in
-`mcp_server/server.json`. After the release changes are merged and authenticated
-Search enrichment has been verified against the deployed backend, tag that approved
-monorepo commit `v0.6.0` and push the tag to start the existing release process.
+`mcp_server/server.json`. Version 0.6.0 predates the required-state Search contract
+and revised Enrich response metadata, so it cannot be reused for these changes.
+After the release changes are merged and authenticated Search and Enrich have
+been verified against the deployed backend, tag that approved monorepo commit
+`v0.6.1` and push the tag to start the existing release process.
 The public mirror receives its package tag from the workflow; tagging the mirror
 alone does not publish the package.
 
 Follow the run through PyPI, registry publication, and mirror sync;
 re-run a failed job rather than moving a release tag. Verify the published wheel
-lists both `mireye_search` and `mireye_enrich`, and that the public mirror's `v0.6.0`
+lists both `mireye_search` and `mireye_enrich`, rejects a Search request without a
+positive `state`/`state2` filter, and passes through the revised Enrich fields
+(including omitted lifecycle and null failure keys, retained nullable values,
+provenance, and interpretation hints). Verify that the public mirror's `v0.6.1`
 contains the same package source. A local build or merged PR alone does not publish.
 
 From this package directory, check distributions locally without publishing:
@@ -419,9 +433,11 @@ python -m build
 ### Parcel Search V1
 
 `POST /v1/search` (MCP: `mireye_search`) accepts one `filters` list of hard
-conditions, optional output-only `fields`, `limit`, and a continuation `cursor`. State and acreage are optional
-filters. It returns the first matches with APN and an interior point, plus filter and
-selected field values. Defaults: 10 results per page and a configurable 180-second
+conditions, optional output-only `fields`, `limit`, and a continuation `cursor`.
+Include a `state` or `state2` filter with `eq` for one two-letter US state code or
+`in` for a nonempty list (50 states and DC); `ne` alone is insufficient. County and
+acreage are optional filters. It returns the first matches with APN and an interior
+point, plus filter and selected field values. Defaults: 10 results per page and a configurable 180-second
 budget. Production uses the same deadline with candidate/evaluation caps of 1,000/500.
 Set `limit` from 1 to 100 on each request, including cursor requests. The response always
 includes `next_cursor`; use a non-null cursor with the same filters, fields and enrich
@@ -431,6 +447,7 @@ Optional `enrich: true` adds every current Enrich field, provenance and partial 
 to each match's separate `enrichment` object; it defaults to false. Both modes share the
 180-second budget. Enrichment reuses the original parcel and interior point; failures
 retain the match and make Search partial. Use a client timeout of at least 210 seconds.
+Enrichment uses the same field metadata and flat preset order as Parcel Enrich below.
 Operational counts are internal. See [the Search contract](https://docs.mireye.ai/api-reference/search).
 
 
@@ -446,3 +463,10 @@ and water-cooling fields are excluded from Enrich, even when explicitly requeste
 they remain available through Fetch. Owner assemblage and all wetland fields remain
 available in Enrich. See the
 [Enrich contract](https://docs.mireye.ai/api-reference/enrich).
+
+The flat `fields` map follows Enrich preset order and each preset's field order.
+Shared fields appear once at their first preset; unassigned fields follow in
+catalog order. Every field retains `interpretation_hints` and its returned
+`confidence`, including on absent values. `lifecycle` is omitted. `error` and
+`retryable` appear only for failed fields, including `retryable: false`. Null
+values, units, timestamps and other provenance metadata remain present.
