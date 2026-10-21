@@ -1407,8 +1407,10 @@ async def mireye_enrich(req: EnrichRequest) -> dict[str, Any]:
     lifecycle, error and retryable stay internal, as do top-level fetched_at and
     partial_failures. The flat fields map follows Enrich preset order and each
     preset's field order; shared fields appear once at their first preset and
-    unassigned fields follow in catalog order. Inline Search enrichment retains its
-    existing detailed field outcomes. Returns the same response as POST /v1/enrich.
+    unassigned fields follow in catalog order. Inline Search uses the same sparse
+    compact cells directly in enriched_fields. Saved legacy Search responses can
+    retain detailed metadata; preserve the shape and provenance actually returned.
+    Returns the same response as POST /v1/enrich.
     Requires authentication and shares account rate limits and Fetch capacity.
     """
     return await _post("/v1/enrich", req.model_dump(mode="json"), tool_name="mireye_enrich")
@@ -1416,7 +1418,45 @@ async def mireye_enrich(req: EnrichRequest) -> dict[str, Any]:
 
 @mcp.tool(title="Search Parcels", annotations=READ_ONLY_TOOL_ANNOTATIONS, structured_output=True)
 async def mireye_search(req: SearchRequest) -> dict[str, Any]:
-    """Find the first parcels satisfying ALL conditions in one filters list, never ranked top matches. Every request requires state (or state2) with eq or a nonempty in list of two-letter US state codes (50 states and DC); ne alone is not sufficient. County is optional. Source routing is automatic: stored parcel predicates run first, then exact geometry predicates and Fetch calculations qualify candidates in batches. Return basic parcel details with APN, an interior point, filter values, and optional additional fields. Additional fields never affect matching; missing information is null with field_status absent or failed. The shortlist excludes internal IDs and returns boundary geometry only when selected in fields. Set optional enrich to true to attach an enrichment object to every returned match with all current Enrich fields, provenance and partial_failures, including catalog geometry and identifier fields. Enrichment fields form a flat map in Enrich preset order, preserving each preset's field order; shared fields appear once at their first preset and unassigned fields follow in catalog order. Field objects include interpretation_hints and confidence, omit lifecycle, and include error and retryable only for failed fields. Preserve null values, units and provenance metadata, the returned confidence even for absent values, and retryable false. Enrich defaults to false. Enrichment reuses the selected parcel and interior analysis point; it does not change matching or shortlist fields. Use geometry with intersects or within and a WGS84 GeoJSON Polygon/MultiPolygon in the same filters list. Search returns 10 matches per page by default; request up to 100 per page. All Search requests share a configurable 180-second default budget for searching and enrichment. If another page is available, next_cursor is returned; send it with unchanged filters, fields and enrich, and choose a limit from 1 to 100 for the next page. Existing sources and their configured live fallbacks may run. Parcel calculations use the original boundary. Enrich-only calculations cannot be filters or selected through fields. No geocoding or new parcel lookup occurs. Check status and completion_reason: partial results cannot establish no-match. Failed enrichment retains a match and makes the response partial. Absent values fail hard filters. Point samples describe that point, not the entire parcel. Invalid requests include issues, correction hints and docs_url."""  # noqa: E501
+    """Find the first parcels satisfying all filters; results are not ranked.
+
+    Require state/state2 with eq or a nonempty in list of two-letter US state codes
+    (50 states and DC); ne alone is insufficient. Filters use only the Search
+    filter catalog. Geometry intersects/within accepts WGS84 Polygon/MultiPolygon.
+    Absent values fail hard filters.
+
+    enrich=false returns top-level identity plus plain fields containing filter
+    values and requested extras, excluding identity duplicates. Extras may be any
+    public Search or Enrich field, never affect matching, and are included in normal
+    Search pricing. Missing/failed extras are null; failed work makes Search partial.
+
+    enrich=true always attempts the full current Enrich catalog regardless of
+    request fields; fields does not select a subset. Matches contain direct
+    enriched_fields compact cells, without fields or a nested Enrich envelope.
+    Cells contain value, source, confidence, interpretation_hints, and unit when
+    nonnull, in Enrich preset/catalog order. Failed fields and most nulls are
+    omitted. Only the standalone Enrich temporary 33-field allowlist retains nulls;
+    read hints and related values, since nulls/omissions do not prove absence or
+    reveal failure counts. Empty enriched_fields still means requested enrichment.
+    Preserve unfamiliar IDs, nested JSON, zero, false and empty values.
+
+    Fresh matches omit field_status, enrichment, enrichment_status and
+    enrichment_error. Read overall status/completion_reason and the single top-level
+    billing receipt. Failed enrichment retains the match but makes Search partial;
+    partial results cannot establish no-match. Saved legacy Search responses may
+    retain older shapes and provenance: preserve all returned metadata.
+
+    Point work preserves raw matched Regrid latitude/longitude unchanged, with
+    analysis_point.method regrid_lat_lon. Missing/invalid pairs skip the candidate,
+    continue searching and make Search partial. No interior-point substitution or
+    new lookup occurs. Polygon calculations retain original geometry; point samples
+    do not describe the whole parcel.
+
+    Defaults: 10 matches and a shared 180-second budget. Limit is 1–100. Continue
+    with next_cursor and unchanged filters, fields and enrich; limit may change.
+    Returns unchanged POST /v1/search JSON. Invalid requests carry issues,
+    correction hints and docs_url.
+    """
     return await _post("/v1/search", req.model_dump(mode="json"), tool_name="mireye_search")
 
 

@@ -52,7 +52,8 @@ class SearchRequest(SearchModel):
         description=(
             "All conditions are required; source routing is automatic. Include state (or state2) "
             "with eq or a nonempty in list of two-letter US state codes (50 states and DC). "
-            "A ne filter alone does not select a state. County is optional."
+            "A ne filter alone does not select a state. County is optional. Only fields in "
+            "the Search filter catalog may be filters; output extras do not expand that catalog."
         ),
     )
     limit: int = Field(
@@ -63,12 +64,23 @@ class SearchRequest(SearchModel):
     )
     enrich: bool = Field(
         default=False, strict=True,
-        description="Return every Enrich field with provenance for each matched parcel.",
+        description=(
+            "False returns identity plus plain fields for filters and requested extras. True "
+            "attempts the full current Enrich catalog for each match, regardless of fields, "
+            "and returns direct compact cells in enriched_fields instead of fields. Failed "
+            "fields and most null values are omitted under the standalone Enrich policy."
+        ),
     )
     cursor: str | None = Field(default=None, min_length=1, max_length=2048)
     fields: list[Annotated[str, Field(min_length=1, pattern=r"^[a-z][a-z0-9_]*$")]] = Field(
         default_factory=list,
-        description="Additional information to return for matches; never used to filter parcels.",
+        description=(
+            "Output-only extras from any public Search or Enrich field; never used to filter "
+            "parcels. With enrich false, fields contains filter values and these extras, "
+            "excluding top-level identity duplicates; missing or failed extras are null. "
+            "Extras are included in normal Search pricing. With enrich true, fields does "
+            "not select an enrichment subset: the full catalog is attempted."
+        ),
     )
 
     @field_validator("filters")

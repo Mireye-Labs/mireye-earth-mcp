@@ -507,20 +507,47 @@ python -m build
 conditions, optional output-only `fields`, `limit`, and a continuation `cursor`.
 Include a `state` or `state2` filter with `eq` for one two-letter US state code or
 `in` for a nonempty list (50 states and DC); `ne` alone is insufficient. County and
-acreage are optional filters. It returns the first matches with APN and an interior
-point, plus filter and selected field values. Defaults: 10 results per page and a configurable 180-second
-budget. Production uses the same deadline with candidate/evaluation caps of 1,000/500.
+acreage are optional filters. It returns the first matches, not ranked top matches.
+Only the Search filter catalog defines valid filters; selecting output extras does
+not expand it. Defaults: 10 results per page and a configurable 180-second budget.
+Production uses the same deadline with candidate/evaluation caps of 1,000/500.
 Set `limit` from 1 to 100 on each request, including cursor requests. The response always
 includes `next_cursor`; use a non-null cursor with the same filters, fields and enrich
 value to continue. Cursors expire after one hour. Over-limit requests are rejected.
-Check `status`, `completion_reason` and `field_status`.
-Optional `enrich: true` adds every current Enrich field, provenance and partial failures
-to each match's separate `enrichment` object; it defaults to false. Both modes share the
-180-second budget. Enrichment reuses the original parcel and interior point; failures
-retain the match and make Search partial. Use a client timeout of at least 210 seconds.
-Inline Search enrichment retains its detailed field metadata and partial failures.
-Standalone Parcel Enrich uses the compact contract below; both share flat preset order.
-Operational counts are internal. See [the Search contract](https://docs.mireye.ai/api-reference/search).
+
+The two output modes retain top-level parcel identity:
+
+- **`enrich: false` (default):** a plain `fields` map contains filter values and
+  requested extras, excluding duplicates of top-level identity. Extras may be any
+  public Search or Enrich field, including public geometry and identifiers. They
+  do not affect matching and are included in normal Search pricing. Missing or
+  failed extras are `null`; failed work makes the overall response partial.
+- **`enrich: true`:** the service attempts the full current Enrich catalog,
+  regardless of the request's `fields` list. `fields` does not select an enrichment
+  subset. Each match has a direct `enriched_fields` map of compact cells, with no
+  match-level `fields` or nested Enrich envelope. Its field order, cell metadata,
+  sparse omissions and temporary 33-field null allowlist are the same as standalone
+  Enrich below. An empty `enriched_fields: {}` still means enrichment was requested.
+
+Fresh matches omit `field_status`, `enrichment`, `enrichment_status`, and
+`enrichment_error`. Check response-level `status` and `completion_reason`, and read
+the single top-level billing receipt. Compact nulls and omissions cannot identify
+per-field failures or establish absence. Failed enrichment retains a match and
+makes Search partial; partial results cannot establish no-match.
+
+Point work uses the matched Regrid latitude/longitude unchanged, reported with
+`analysis_point.method: "regrid_lat_lon"`; it is not a computed interior point.
+A missing or invalid coordinate pair skips that candidate, continues searching,
+and makes the response partial. Polygon calculations retain the original parcel
+geometry. Point samples describe the supplied point, not the whole parcel.
+Enrichment reuses the selected parcel without geocoding or a new parcel lookup.
+Both modes share the 180-second budget. Use a client timeout of at least 210 seconds.
+
+The MCP adapter passes through the response JSON unchanged. Saved legacy responses
+can retain their previous shape, coordinate method, and detailed provenance;
+preserve all metadata actually returned rather than rewriting it to the fresh
+contract. Operational counts are internal. See
+[the Search contract](https://docs.mireye.ai/api-reference/search).
 
 
 ### Parcel Enrich
@@ -548,5 +575,7 @@ field IDs, nested JSON values, zero, false, empty strings and empty lists.
 
 Field metadata `source_url`, `fetched_at`, `dataset_vintage`, `ttl_seconds`, `notes`,
 `status`, `lifecycle`, `error`, and `retryable` stays internal, as do top-level
-`fetched_at` and `partial_failures`. Inline Search enrichment keeps its existing
-detailed field outcomes. See the [Enrich contract](https://docs.mireye.ai/api-reference/enrich).
+`fetched_at` and `partial_failures`. Inline Search uses these same sparse compact
+cells directly in `enriched_fields`. Saved legacy Search responses can still carry
+their original detailed metadata; preserve what is returned. See the
+[Enrich contract](https://docs.mireye.ai/api-reference/enrich).
