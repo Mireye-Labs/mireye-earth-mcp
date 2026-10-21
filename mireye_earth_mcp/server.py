@@ -1381,7 +1381,36 @@ async def mireye_lookup(
 
 @mcp.tool(title="Enrich a Parcel", annotations=READ_ONLY_TOOL_ANNOTATIONS, structured_output=True)
 async def mireye_enrich(req: EnrichRequest) -> dict[str, Any]:
-    """Enrich one US parcel with selected parcel attributes, point data and polygon calculations, with provenance and ok/absent/failed status per field. Give EITHER address OR lat+lng inside req, never both; include city+state or ZIP with a street address. Use fields for individual Enrich field IDs and preset for one named Enrich bundle. Both selectors combine by union without duplicates; omitting or nulling both requests all Enrich fields, so prefer a small explicit selection. See https://docs.mireye.ai/api-reference/enrich-fields for Enrich fields and presets; the Fetch catalog resources describe a different field set. ALWAYS inspect parcel_match.status first: only matched returns fields; no_match, ambiguous and unavailable return match evidence with empty fields. Never choose an ambiguous candidate automatically. Point data uses the matched parcel's analysis_point, while polygon calculations describe its boundary. Inspect each field's status and partial_failures; an absent value means no data and a failed value is not evidence of absence. Fields form a flat map in Enrich preset order, preserving each preset's field order; shared fields appear once at their first preset and unassigned fields follow in catalog order. Field objects include interpretation_hints and confidence, omit lifecycle, and include error and retryable only for failed fields. Preserve null values, units and provenance metadata, the returned confidence even for absent values, and retryable false. Returns the same response as POST /v1/enrich. Requires authentication with no plan restriction, currently costs zero customer credits, and shares account rate limits and Fetch execution capacity."""  # noqa: E501
+    """Enrich one US parcel with selected attributes and calculations.
+
+    Give EITHER address OR lat+lng inside req, never both; include city+state or
+    ZIP with a street address. Use fields for individual Enrich field IDs and
+    preset for one named Enrich bundle. Both selectors combine without duplicates;
+    omitting or nulling both requests all fields. Prefer a small explicit selection.
+    See https://docs.mireye.ai/api-reference/enrich-fields for the current catalog;
+    Fetch catalog resources describe a different field set.
+
+    Inspect parcel_match.status first: only matched returns fields. Other match
+    outcomes return evidence with empty fields; never choose an ambiguous candidate
+    automatically. Point data uses analysis_point; polygon calculations describe
+    the matched boundary.
+
+    Returned fields contain only value, source, confidence, interpretation_hints,
+    and unit when nonnull. Failed fields are always omitted. Null values are
+    retained only for a temporary fixed allowlist of 33 fields and may mean
+    meaningful absence or missing information. Read interpretation_hints and related
+    values: a retained null alone does not prove absence. Other null-valued fields
+    are omitted. An omitted field is unknown, not a zero or negative finding.
+    Preserve unfamiliar field IDs, nested JSON values, zero, false and empty values.
+
+    Field source_url, fetched_at, dataset_vintage, ttl_seconds, notes, status,
+    lifecycle, error and retryable stay internal, as do top-level fetched_at and
+    partial_failures. The flat fields map follows Enrich preset order and each
+    preset's field order; shared fields appear once at their first preset and
+    unassigned fields follow in catalog order. Inline Search enrichment retains its
+    existing detailed field outcomes. Returns the same response as POST /v1/enrich.
+    Requires authentication and shares account rate limits and Fetch capacity.
+    """
     return await _post("/v1/enrich", req.model_dump(mode="json"), tool_name="mireye_enrich")
 
 
