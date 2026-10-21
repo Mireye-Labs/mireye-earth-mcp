@@ -1446,9 +1446,9 @@ async def mireye_search(req: SearchRequest) -> dict[str, Any]:
     partial results cannot establish no-match. Saved legacy Search responses may
     retain older shapes and provenance: preserve all returned metadata.
 
-    Point work preserves raw matched Regrid latitude/longitude unchanged, with
-    analysis_point.method regrid_lat_lon. Missing/invalid pairs skip the candidate,
-    continue searching and make Search partial. No interior-point substitution or
+    Point work preserves the matched record's stored parcel coordinates unchanged,
+    with analysis_point.method parcel_stored_lat_lon. Missing/invalid pairs skip
+    the candidate, continue searching and make Search partial. No interior-point substitution or
     new lookup occurs. Polygon calculations retain original geometry; point samples
     do not describe the whole parcel.
 

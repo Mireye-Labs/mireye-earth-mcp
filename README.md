@@ -535,8 +535,8 @@ the single top-level billing receipt. Compact nulls and omissions cannot identif
 per-field failures or establish absence. Failed enrichment retains a match and
 makes Search partial; partial results cannot establish no-match.
 
-Point work uses the matched Regrid latitude/longitude unchanged, reported with
-`analysis_point.method: "regrid_lat_lon"`; it is not a computed interior point.
+Point work uses the matched record's stored parcel coordinates unchanged, reported
+with `analysis_point.method: "parcel_stored_lat_lon"`; it is not a computed interior point.
 A missing or invalid coordinate pair skips that candidate, continues searching,
 and makes the response partial. Polygon calculations retain the original parcel
 geometry. Point samples describe the supplied point, not the whole parcel.
