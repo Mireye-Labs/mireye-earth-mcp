@@ -518,7 +518,8 @@ Optional `enrich: true` adds every current Enrich field, provenance and partial 
 to each match's separate `enrichment` object; it defaults to false. Both modes share the
 180-second budget. Enrichment reuses the original parcel and interior point; failures
 retain the match and make Search partial. Use a client timeout of at least 210 seconds.
-Enrichment uses the same field metadata and flat preset order as Parcel Enrich below.
+Inline Search enrichment retains its detailed field metadata and partial failures.
+Standalone Parcel Enrich uses the compact contract below; both share flat preset order.
 Operational counts are internal. See [the Search contract](https://docs.mireye.ai/api-reference/search).
 
 
@@ -528,16 +529,24 @@ Operational counts are internal. See [the Search contract](https://docs.mireye.a
 `lat`+`lng` and returns selected attributes and calculations with source metadata.
 Pass the same HTTP object inside `req` for MCP. Select individual Enrich `fields`,
 one Enrich `preset`, or both; omitting both requests all fields. Start with a small
-set. Check `parcel_match.status`, confirm the parcel identity, then inspect each
-field's `status`. Enrich selectors differ from Fetch selectors. Eight hydrography
-and water-cooling fields are excluded from Enrich, even when explicitly requested;
-they remain available through Fetch. Owner assemblage and all wetland fields remain
-available in Enrich. See the
-[Enrich contract](https://docs.mireye.ai/api-reference/enrich).
+set. Check `parcel_match.status` and confirm the parcel identity before using fields.
+Only `matched` returns fields; other match outcomes return evidence and empty fields.
+Enrich selectors differ from Fetch selectors. Use the current
+[Enrich field catalog](https://docs.mireye.ai/api-reference/enrich-fields).
 
 The flat `fields` map follows Enrich preset order and each preset's field order.
 Shared fields appear once at their first preset; unassigned fields follow in
-catalog order. Every field retains `interpretation_hints` and its returned
-`confidence`, including on absent values. `lifecycle` is omitted. `error` and
-`retryable` appear only for failed fields, including `retryable: false`. Null
-values, units, timestamps and other provenance metadata remain present.
+catalog order. Each returned field contains only `value`, `source`, `confidence`,
+and `interpretation_hints`, plus `unit` when nonnull. A missing unit is omitted.
+
+Failed fields are always omitted. Null values are retained only for a temporary
+fixed allowlist of 33 fields; these nulls may mean meaningful absence or missing
+information. Read `interpretation_hints` and related values: a retained null alone
+does not prove absence. Null-valued fields outside the allowlist are omitted.
+An omitted field is unknown, not a zero or negative finding. Preserve unfamiliar
+field IDs, nested JSON values, zero, false, empty strings and empty lists.
+
+Field metadata `source_url`, `fetched_at`, `dataset_vintage`, `ttl_seconds`, `notes`,
+`status`, `lifecycle`, `error`, and `retryable` stays internal, as do top-level
+`fetched_at` and `partial_failures`. Inline Search enrichment keeps its existing
+detailed field outcomes. See the [Enrich contract](https://docs.mireye.ai/api-reference/enrich).
