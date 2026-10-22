@@ -19,7 +19,7 @@ Authentication paths are distinct:
 - HTTP requests use `Authorization: Bearer <API token>`. The quickstart names the environment variable `MIREYE_API_TOKEN`.
 - The `mireye-mcp` package is an installation/diagnostic helper only. Its saved scoped API key at `~/.config/mireye-mcp/credentials.json` is private and bound to the API origin and account. It does not run a local MCP server or create an OAuth grant.
 
-If authentication is missing, identify the needed connection and use the [documented sign-in path](https://docs.mireye.ai/authentication). Keep credentials out of skill files, project instructions, and displayed output. For setup diagnostics, run `uvx --from mireye-mcp==0.7.2 mireye-mcp doctor`. `doctor --proof` makes one free REST elevation Fetch and validates its provenance. This does not verify or authorize hosted MCP OAuth; complete the client’s sign-in separately. Reconnect with `mireye-mcp connect --client <client>` when configuration is missing. This skill does not change client configuration on its own.
+If authentication is missing, identify the needed connection and use the [documented sign-in path](https://docs.mireye.ai/authentication). Keep credentials out of skill files, project instructions, and displayed output. For setup diagnostics, run `uvx --from mireye-mcp==0.7.3 mireye-mcp doctor`. `doctor --proof` makes one free REST elevation Fetch and validates its provenance. This does not verify or authorize hosted MCP OAuth; complete the client’s sign-in separately. Reconnect with `mireye-mcp connect --client <client>` when configuration is missing. This skill does not change client configuration on its own.
 
 ## Route the request
 

@@ -152,10 +152,20 @@ def _logout(args: argparse.Namespace) -> int:
             if args.base_url and stored and _stored_base_url(stored) != base_url:
                 raise config.SetupError("Stored credentials belong to another API origin.")
             if args.revoke and stored.get("token"):
+                # Only guided setup confirms the key ID with the API. A stored ID
+                # without its attempt may come from a locally decoded claim.
                 token_id = stored.get("verified_token_id")
-                if not isinstance(token_id, str) or not ATTEMPT_PATTERN.fullmatch(token_id):
+                attempt = stored.get("onboarding_attempt_id")
+                if (
+                    not isinstance(token_id, str)
+                    or not ATTEMPT_PATTERN.fullmatch(token_id)
+                    or not isinstance(attempt, str)
+                    or not ATTEMPT_PATTERN.fullmatch(attempt)
+                ):
                     raise config.SetupError(
-                        "Revoke this key in the dashboard; its ID is unverified."
+                        "Mireye has not confirmed this key's ID, so it was not revoked and "
+                        "the saved key was kept. Revoke it in the Mireye dashboard, then "
+                        "run logout without --revoke."
                     )
                 _sync_request(
                     "DELETE",

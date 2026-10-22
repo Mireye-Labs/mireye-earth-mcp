@@ -210,15 +210,27 @@ def _authenticate(args: argparse.Namespace, base_url: str, *, reconnect: bool = 
     stored = server._load_stored_credentials() or {}
     if reconnect and stored:
         previous_uid = stored.get("uid")
+        identity_lost = False
         if previous_uid is None and stored.get("token"):
-            previous = server._sync_request(
-                "GET",
-                "/v1/users/me",
-                token=stored["token"],
-                base_url=server._stored_base_url(stored),
-            )
-            previous_uid = previous.get("user", {}).get("uid")
-        if previous_uid != uid:
+            # 0.7.1 credentials have no saved uid; recover it from the old key.
+            try:
+                previous = server._sync_request(
+                    "GET",
+                    "/v1/users/me",
+                    token=stored["token"],
+                    base_url=server._stored_base_url(stored),
+                )
+            except httpx.HTTPStatusError as exc:
+                # An expired or revoked legacy key can no longer act for any
+                # account, so the newly verified key may replace it. Network
+                # and server errors still abort without changing anything.
+                if exc.response.status_code not in (401, 403):
+                    raise
+                identity_lost = True
+            else:
+                user = previous.get("user")
+                previous_uid = user.get("uid") if isinstance(user, dict) else None
+        if not identity_lost and previous_uid != uid:
             raise config.SetupError(
                 "Existing setup belongs to another account. Remove its managed connection "
                 "and sign out before connecting a different account."
@@ -242,10 +254,10 @@ def _authenticate(args: argparse.Namespace, base_url: str, *, reconnect: bool = 
             raise config.SetupError("The setup identity does not match the supplied API key.")
         metadata.update({"token_id": verified_id, "verified_token_id": verified_id})
     elif supplied_key and args.token_id:
+        # A locally decoded claim is not server confirmation of the key's ID, so
+        # it is display metadata only; logout --revoke needs a verified ID.
         if metadata.get("token_id") not in (None, args.token_id):
             raise config.SetupError("The token ID does not match the supplied API key.")
-        if metadata.get("token_id") == args.token_id:
-            metadata["verified_token_id"] = args.token_id
         metadata["token_id"] = args.token_id
     # Save only after account and (for guided setup) exact attempt/key identity
     # validation. Invalid replacements leave the prior login/config untouched.
@@ -256,6 +268,10 @@ def _authenticate(args: argparse.Namespace, base_url: str, *, reconnect: bool = 
     credentials.update({"token": token, "base_url": base_url, "uid": uid, **metadata})
     if attempt:
         credentials["onboarding_attempt_id"] = attempt
+    else:
+        # Only the guided-attempt credential check confirms a key ID server-side.
+        # Drop any ID an earlier helper saved from a locally decoded claim.
+        credentials.pop("verified_token_id", None)
     if credentials != stored:
         server._store_credentials(credentials)
     return token
@@ -456,7 +472,10 @@ def doctor(args: argparse.Namespace) -> int:
                     raise config.SetupError("MCP configuration changed or is missing; reconnect.")
                 entry = record["entry"]
                 if entry != config.hosted_spec(base_url, client):
-                    raise config.SetupError("MCP configuration is not the expected hosted URL.")
+                    raise config.SetupError(
+                        "MCP configuration is not the expected hosted URL. Run connect for "
+                        "this client to upgrade it, or check upgraded clients with --client."
+                    )
                 if config.skill_path(home, client).read_bytes() != config.bundled_skill():
                     raise config.SetupError(
                         "Bundled skill is missing or changed; reconnect or review your edits."

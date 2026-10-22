@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "com.mireye/earth",
   "description": "Mireye Earth: free public geospatial data, parcel enrichment, search, and cited answers.",
-  "version": "0.7.2",
+  "version": "0.7.3",
   "websiteUrl": "https://api.mireye.com",
   "remotes": [
     {

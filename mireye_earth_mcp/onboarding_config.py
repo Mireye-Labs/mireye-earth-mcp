@@ -24,7 +24,7 @@ SERVER_NAME = "mireye-earth"
 SKILL_NAME = "use-mireye"
 BEGIN = "# BEGIN Mireye managed MCP\n"
 END = "# END Mireye managed MCP\n"
-PACKAGE_SPEC = "mireye-mcp==0.7.2"
+PACKAGE_SPEC = "mireye-mcp==0.7.3"
 _UNSET = object()
 _LOCK_CONTEXT = threading.local()
 
