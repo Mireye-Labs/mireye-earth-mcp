@@ -79,8 +79,8 @@ transport distribution, and installing it does not add a second data service.
 
 The hosted `mireye_enrich` tool returns the same compact response as
 `POST /v1/enrich`. Each returned field contains `value`, `source`, `confidence`,
-and `interpretation_hints`, with `unit` only when defined. A matched parcel can
-return `fields: {}`.
+and `interpretation_hints`, with `unit` only when defined. Failed fields are
+omitted. A matched parcel can return `fields: {}`.
 
 Coordinates, geocode evidence, the analysis point, parcel match status and
 billing are included. `mireye_enrich` takes `preset` as a list of one or more
