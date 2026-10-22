@@ -22,7 +22,7 @@ dependencies = [
 
 [project.urls]
 Homepage = "https://api.mireye.com"
-Repository = "https://github.com/Mireye-Labs/mireye-earth/tree/main/mcp_server"
+Repository = "https://github.com/Mireye-Labs/mireye-earth-mcp"
 
 [project.scripts]
 mireye-mcp = "mireye_earth_mcp.server:main"
