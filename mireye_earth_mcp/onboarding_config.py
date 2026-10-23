@@ -6,7 +6,6 @@ import hashlib
 import json
 import os
 import shutil
-import sys
 import tempfile
 import threading
 from contextlib import contextmanager
@@ -25,7 +24,7 @@ SERVER_NAME = "mireye-earth"
 SKILL_NAME = "use-mireye"
 BEGIN = "# BEGIN Mireye managed MCP\n"
 END = "# END Mireye managed MCP\n"
-PACKAGE_SPEC = "mireye-mcp==0.7.1"
+PACKAGE_SPEC = "mireye-mcp==0.7.3"
 _UNSET = object()
 _LOCK_CONTEXT = threading.local()
 
@@ -193,28 +192,21 @@ def detected(home: Path, client: str, *, isolated: bool) -> bool:
     return shutil.which(command) is not None
 
 
-def launch_spec(base_url: str, credentials: Path, package_source: str | None) -> dict[str, Any]:
-    env = {
-        "MIREYE_BASE_URL": base_url,
-        "MIREYE_MCP_CREDENTIALS_FILE": str(credentials),
-        # The managed connection uses its saved login even if the parent agent
-        # inherited a different key. No credential is embedded in agent config.
-        "MIREYE_BEARER_TOKEN": "",
-    }
-    if package_source:
-        source = Path(package_source).expanduser().resolve()
-        if not (source / "mireye_earth_mcp" / "server.py").is_file():
-            raise SetupError("--package-source must name a local mireye-mcp package directory.")
-        env["PYTHONPATH"] = str(source)
-        return {"command": sys.executable, "args": ["-m", "mireye_earth_mcp.server"], "env": env}
-    uvx = shutil.which("uvx")
-    if not uvx:
-        raise SetupError("uvx is not on PATH. Install uv, then run connect again.")
-    return {
-        "command": str(Path(uvx).absolute()),
-        "args": ["--from", PACKAGE_SPEC, "mireye-mcp"],
-        "env": env,
-    }
+def hosted_spec(base_url: str, client: str) -> dict[str, Any]:
+    """Native remote configurations; each client owns its OAuth authorization.
+
+    Claude Code requires an explicit HTTP type; Codex and Cursor select the
+    remote transport from url. No key, local command or local server is installed.
+    """
+    if client not in CLIENTS:
+        raise SetupError("Unsupported client.")
+    from .server import _require_token_safe_base_url
+
+    _require_token_safe_base_url(base_url)
+    entry: dict[str, Any] = {"url": f"{base_url}/mcp"}
+    if client == "claude-code":
+        entry = {"type": "http", **entry}
+    return entry
 
 
 def read_entry(path: Path, client: str) -> tuple[dict[str, Any], str]:
@@ -236,13 +228,9 @@ def read_entry(path: Path, client: str) -> tuple[dict[str, Any], str]:
 
 
 def _block(entry: dict[str, Any]) -> str:
-    text = BEGIN + f"[mcp_servers.{SERVER_NAME}]\n"
-    for key in ("command", "args"):
-        text += f"{key} = {json.dumps(entry[key], ensure_ascii=False)}\n"
-    text += f"[mcp_servers.{SERVER_NAME}.env]\n"
-    for key, value in sorted(entry["env"].items()):
-        text += f"{json.dumps(key)} = {json.dumps(value, ensure_ascii=False)}\n"
-    return text + END
+    if set(entry) != {"url"}:
+        raise SetupError("Codex's managed connection must use the hosted URL only.")
+    return BEGIN + f"[mcp_servers.{SERVER_NAME}]\nurl = {json.dumps(entry['url'])}\n" + END
 
 
 def _remove_block(raw: str) -> str:
