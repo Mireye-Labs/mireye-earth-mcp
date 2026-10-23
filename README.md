@@ -1,6 +1,6 @@
 # Mireye hosted MCP setup helper
 
-`mireye-mcp` 0.7.2 configures Claude Code, Codex and Cursor to connect directly to
+`mireye-mcp` 0.7.3 configures Claude Code, Codex and Cursor to connect directly to
 **https://api.mireye.com/mcp**, and installs the `use-mireye` skill. The package
 runs no MCP server. Its default invocation refuses the retired local stdio
 transport; device login and local data tools are not included.
@@ -13,8 +13,8 @@ before saving the key or changing client configuration.
 
 ```bash
 # The agent supplies the private key on stdin, without echoing or logging it.
-uvx --from mireye-mcp==0.7.2 mireye-mcp connect --all --api-key-stdin --attempt-id '<attempt-id>' --token-id '<token-id>'
-uvx --from mireye-mcp==0.7.2 mireye-mcp doctor --proof
+uvx --from mireye-mcp==0.7.3 mireye-mcp connect --all --api-key-stdin --attempt-id '<attempt-id>' --token-id '<token-id>'
+uvx --from mireye-mcp==0.7.3 mireye-mcp doctor --proof
 ```
 
 `connect` writes native hosted configurations, without API keys or local launch
@@ -47,15 +47,15 @@ MCP client's OAuth flow.
 
 ```bash
 # Preview only: no key read, API requests, login save, lock or file changes.
-uvx --from mireye-mcp==0.7.2 mireye-mcp connect --all --dry-run
+uvx --from mireye-mcp==0.7.3 mireye-mcp connect --all --dry-run
 # Reuse the saved key; --client can be repeated.
-uvx --from mireye-mcp==0.7.2 mireye-mcp connect --client codex
+uvx --from mireye-mcp==0.7.3 mireye-mcp connect --client codex
 # Read a redacted diagnostic report.
-uvx --from mireye-mcp==0.7.2 mireye-mcp doctor --proof --json
+uvx --from mireye-mcp==0.7.3 mireye-mcp doctor --proof --json
 # Remove unchanged owned entries/skills, retaining the helper API key.
-uvx --from mireye-mcp==0.7.2 mireye-mcp connect --all --remove
+uvx --from mireye-mcp==0.7.3 mireye-mcp connect --all --remove
 # Remove the helper's saved key. --revoke also revokes its server-verified key ID.
-uvx --from mireye-mcp==0.7.2 mireye-mcp logout
+uvx --from mireye-mcp==0.7.3 mireye-mcp logout
 ```
 
 `--all` skips absent supported clients; explicitly selecting an absent client
